@@ -32,9 +32,11 @@ Pushes to `main` publish a Docker image to GitHub Container Registry:
 
 ```text
 ghcr.io/r6wolves-afk/nebula:latest
+ghcr.io/r6wolves-afk/nebula:0.2.0
+ghcr.io/r6wolves-afk/nebula:<commit-sha>
 ```
 
-Use `portainer-stack.yml` as the Portainer stack template after the image publish workflow finishes.
+Use `portainer-stack.yml` as the Portainer stack template after the image publish workflow finishes. The stack uses `latest` with `pull_policy: always`, so Portainer pulls the newest published image on redeploy. Pin the `image` value to a version tag such as `ghcr.io/r6wolves-afk/nebula:0.2.0` if you want a fixed release instead.
 
 For private add-on repositories, add a Portainer stack environment variable named `NEBULA_GITHUB_TOKEN` with a GitHub token that can read the private `Nebula-*` repos. The stack passes that token into Nebula without storing it in the compose file. The stack also sets `NEBULA_MAX_UPLOAD_BYTES=1073741824`, which allows 1 GB uploads for file-based add-ons.
 
@@ -101,6 +103,34 @@ DELETE /api/addons/<addon-id>/user-files/<entry-id>
 The file API is a per-user folder tree. Omit `parentId` or pass `null` for the root folder. Listing a folder returns `entries`, `files`, `currentFolder`, `breadcrumbs`, and `allEntries`; entries are either `type: "folder"` with `id`, `name`, `parentId`, timestamps, or `type: "file"` with `id`, `name`, `filename`, `mimeType`, `size`, `parentId`, timestamps. `PATCH` renames an entry, moves it to another folder, or both. `DELETE` removes files and recursively removes folders.
 
 File uploads are stored under the Nebula data volume at `addon-files/users/<user-id>/<addon-id>`. Add-ons should declare `files.read` and `files.write` permissions when they use this API. The default upload limit is 1 GB and can be changed with `NEBULA_MAX_UPLOAD_BYTES`.
+
+Core also supports viewer-only file sharing for add-ons that build file experiences:
+
+```text
+GET /api/users/directory
+POST /api/addons/<addon-id>/user-files/<entry-id>/shares { "scope": "user", "targetUserId": "...", "permission": "viewer" }
+POST /api/addons/<addon-id>/user-files/<entry-id>/shares { "scope": "server", "permission": "viewer" }
+GET /api/addons/<addon-id>/shared-with-me
+GET /api/addons/<addon-id>/shared-by-me
+GET /api/addons/<addon-id>/shared-with-me/<share-id>/files?parentId=<folder-id>
+DELETE /api/addons/<addon-id>/user-files/<entry-id>/shares/<share-id>
+```
+
+User-scoped shares are visible only to the target Nebula user. Server-scoped shares are visible to any authenticated user on this Nebula server. Shared users can list shared entries and open/download shared files, including files inside a shared folder, but owner-only routes still control rename, move, delete, and share revocation.
+
+Nebula core includes chat and notifications for signed-in users:
+
+```text
+GET /api/chat/general
+POST /api/chat/general { "body": "Hello everyone" }
+GET /api/chat/direct/<user-id>
+POST /api/chat/direct/<user-id> { "body": "Hello" }
+GET /api/notifications
+PATCH /api/notifications/<notification-id> { "read": true }
+POST /api/notifications/read-all
+```
+
+General chat is visible to every authenticated user. Direct messages are visible only to the sender and target user. Chat messages create `chat` notifications for recipients; users can mark one notification or all notifications as read.
 
 If local catalog fallback is enabled, you can point Nebula at a different local catalog file with:
 

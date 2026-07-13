@@ -3,10 +3,11 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
-import type { AddonFileEntry, AddonFileRecord, AddonFolderRecord } from "@nebula/shared";
+import type { AddonFileEntry, AddonFileRecord, AddonFileShare, AddonFolderRecord } from "@nebula/shared";
 
 const dataDir = process.env.NEBULA_DATA_DIR ?? path.resolve(process.cwd(), ".nebula-data");
 const filesDir = path.join(dataDir, "addon-files");
+const sharesPath = path.join(dataDir, "addon-file-shares.json");
 
 type StoredAddonFileRecord = AddonFileRecord & {
   storedName: string;
@@ -16,6 +17,9 @@ type StoredAddonFileEntry = StoredAddonFileRecord | AddonFolderRecord;
 type EntryMutationResult =
   | { status: "ok"; entry: AddonFileEntry }
   | { status: "not-found" | "invalid-parent" | "cycle" | "duplicate-name" };
+type ShareMutationResult =
+  | { status: "ok"; share: AddonFileShare }
+  | { status: "not-found" | "invalid-target" | "duplicate-share" };
 
 function resolveAddonFilesDir(userId: string, addonId: string) {
   return path.join(filesDir, "users", userId, addonId);
@@ -95,6 +99,23 @@ async function readIndex(userId: string, addonId: string): Promise<StoredAddonFi
   }
 }
 
+async function readShares(): Promise<AddonFileShare[]> {
+  try {
+    return JSON.parse((await readFile(sharesPath, "utf8")).replace(/^\uFEFF/, "")) as AddonFileShare[];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+async function writeShares(shares: AddonFileShare[]) {
+  await mkdir(path.dirname(sharesPath), { recursive: true });
+  await writeFile(sharesPath, JSON.stringify(shares, null, 2), "utf8");
+}
+
 async function writeIndex(userId: string, addonId: string, entries: StoredAddonFileEntry[]) {
   const indexPath = resolveIndexPath(userId, addonId);
   await mkdir(path.dirname(indexPath), { recursive: true });
@@ -122,6 +143,29 @@ function collectDescendantIds(entries: StoredAddonFileEntry[], folderId: string)
 
   visit(folderId);
   return descendants;
+}
+
+function isEntryInsideFolder(entries: StoredAddonFileEntry[], entryId: string, folderId: string) {
+  let current = entries.find((entry) => entry.id === entryId);
+
+  while (current?.parentId) {
+    if (current.parentId === folderId) {
+      return true;
+    }
+
+    current = entries.find((entry) => entry.id === current?.parentId);
+  }
+
+  return false;
+}
+
+function visibleShareMatchesEntry(share: AddonFileShare, entries: StoredAddonFileEntry[], entryId: string) {
+  if (share.entryId === entryId) {
+    return true;
+  }
+
+  const sharedRoot = entries.find((entry) => entry.id === share.entryId);
+  return sharedRoot?.type === "folder" && isEntryInsideFolder(entries, entryId, sharedRoot.id);
 }
 
 function breadcrumbs(entries: StoredAddonFileEntry[], folderId: string | null) {
@@ -288,6 +332,177 @@ export async function getAddonFile(userId: string, addonId: string, fileId: stri
   };
 }
 
+export async function getSharedAddonFile(userId: string, addonId: string, fileId: string) {
+  const shares = await readShares();
+  const matchingShares = shares.filter((share) =>
+    share.addonId === addonId &&
+    share.ownerUserId !== userId &&
+    (share.scope === "server" || share.targetUserId === userId)
+  );
+
+  for (const share of matchingShares) {
+    const entries = await readIndex(share.ownerUserId, addonId);
+    if (!visibleShareMatchesEntry(share, entries, fileId)) {
+      continue;
+    }
+
+    const record = entries.find((entry): entry is StoredAddonFileRecord => entry.type === "file" && entry.id === fileId);
+    if (!record) {
+      continue;
+    }
+
+    const storedFile = {
+      file: publicEntry(record) as AddonFileRecord,
+      filePath: resolveFilePath(share.ownerUserId, addonId, record.storedName)
+    };
+    if (storedFile) {
+      return { ...storedFile, share };
+    }
+  }
+
+  return undefined;
+}
+
+export async function listSharedAddonFileEntries(userId: string, addonId: string, shareId: string, parentId?: string | null) {
+  const shares = await readShares();
+  const share = shares.find((candidate) =>
+    candidate.id === shareId &&
+    candidate.addonId === addonId &&
+    candidate.ownerUserId !== userId &&
+    (candidate.scope === "server" || candidate.targetUserId === userId)
+  );
+
+  if (!share) {
+    return undefined;
+  }
+
+  const entries = await readIndex(share.ownerUserId, addonId);
+  const sharedRoot = entries.find((entry): entry is AddonFolderRecord => entry.type === "folder" && entry.id === share.entryId);
+  if (!sharedRoot) {
+    return undefined;
+  }
+
+  const targetParentId = parentId ?? sharedRoot.id;
+  const targetFolder = entries.find((entry): entry is AddonFolderRecord => entry.type === "folder" && entry.id === targetParentId);
+  if (!targetFolder || (targetParentId !== sharedRoot.id && !isEntryInsideFolder(entries, targetParentId, sharedRoot.id))) {
+    return undefined;
+  }
+
+  const allowedEntries = entries.filter((entry) => entry.id === sharedRoot.id || isEntryInsideFolder(entries, entry.id, sharedRoot.id));
+  const fullBreadcrumbs = breadcrumbs(entries, targetParentId);
+  const rootIndex = fullBreadcrumbs.findIndex((folder) => folder.id === sharedRoot.id);
+  const sharedBreadcrumbs = rootIndex >= 0 ? fullBreadcrumbs.slice(rootIndex) : [publicEntry(sharedRoot) as AddonFolderRecord];
+
+  return {
+    share,
+    entries: entries.filter((entry) => entry.parentId === targetParentId).map(publicEntry),
+    currentFolder: publicEntry(targetFolder) as AddonFolderRecord,
+    breadcrumbs: sharedBreadcrumbs,
+    allEntries: allowedEntries.map(publicEntry)
+  };
+}
+
+export async function createAddonFileShare({
+  addonId,
+  entryId,
+  ownerUserId,
+  scope,
+  targetUserId
+}: {
+  addonId: string;
+  entryId: string;
+  ownerUserId: string;
+  scope: "user" | "server";
+  targetUserId?: string;
+}): Promise<ShareMutationResult> {
+  const entries = await readIndex(ownerUserId, addonId);
+  if (!entries.some((entry) => entry.id === entryId)) {
+    return { status: "not-found" };
+  }
+
+  if (scope === "user" && (!targetUserId || targetUserId === ownerUserId)) {
+    return { status: "invalid-target" };
+  }
+
+  const shares = await readShares();
+  const duplicateShare = shares.some((share) =>
+    share.addonId === addonId &&
+    share.entryId === entryId &&
+    share.ownerUserId === ownerUserId &&
+    share.scope === scope &&
+    (scope === "server" || share.targetUserId === targetUserId)
+  );
+
+  if (duplicateShare) {
+    return { status: "duplicate-share" };
+  }
+
+  const share: AddonFileShare = {
+    id: randomUUID(),
+    addonId,
+    entryId,
+    ownerUserId,
+    scope,
+    targetUserId: scope === "user" ? targetUserId : undefined,
+    permission: "viewer",
+    createdAt: new Date().toISOString()
+  };
+
+  await writeShares([share, ...shares]);
+  return { status: "ok", share };
+}
+
+export async function listAddonFileSharesByMe(userId: string, addonId: string) {
+  const shares = await readShares();
+  const ownedShares = shares.filter((share) => share.addonId === addonId && share.ownerUserId === userId);
+  const entries = await readIndex(userId, addonId);
+
+  return ownedShares
+    .map((share) => ({
+      share,
+      entry: entries.find((entry) => entry.id === share.entryId)
+    }))
+    .filter((sharedEntry): sharedEntry is { share: AddonFileShare; entry: StoredAddonFileEntry } => Boolean(sharedEntry.entry))
+    .map(({ share, entry }) => ({ share, entry: publicEntry(entry) }));
+}
+
+export async function listAddonFileSharesWithMe(userId: string, addonId: string) {
+  const shares = await readShares();
+  const visibleShares = shares.filter((share) =>
+    share.addonId === addonId &&
+    share.ownerUserId !== userId &&
+    (share.scope === "server" || share.targetUserId === userId)
+  );
+  const sharedEntries: Array<{ share: AddonFileShare; entry: AddonFileEntry }> = [];
+
+  for (const share of visibleShares) {
+    const entries = await readIndex(share.ownerUserId, addonId);
+    const entry = entries.find((candidate) => candidate.id === share.entryId);
+    if (entry) {
+      sharedEntries.push({ share, entry: publicEntry(entry) });
+    }
+  }
+
+  return sharedEntries;
+}
+
+export async function deleteAddonFileShare(ownerUserId: string, addonId: string, entryId: string, shareId: string) {
+  const shares = await readShares();
+  const nextShares = shares.filter((share) => !(
+    share.id === shareId &&
+    share.addonId === addonId &&
+    share.entryId === entryId &&
+    share.ownerUserId === ownerUserId
+  ));
+
+  if (nextShares.length === shares.length) {
+    return false;
+  }
+
+  await writeShares(nextShares);
+  return true;
+}
+
 export async function deleteAddonFileEntry(userId: string, addonId: string, entryId: string) {
   const entries = await readIndex(userId, addonId);
   const record = entries.find((entry) => entry.id === entryId);
@@ -306,7 +521,8 @@ export async function deleteAddonFileEntry(userId: string, addonId: string, entr
   const deletedFiles = entries.filter((entry): entry is StoredAddonFileRecord => deletedIds.has(entry.id) && entry.type === "file");
   await Promise.all([
     writeIndex(userId, addonId, entries.filter((entry) => !deletedIds.has(entry.id))),
-    ...deletedFiles.map((file) => rm(resolveFilePath(userId, addonId, file.storedName), { force: true }))
+    ...deletedFiles.map((file) => rm(resolveFilePath(userId, addonId, file.storedName), { force: true })),
+    readShares().then((shares) => writeShares(shares.filter((share) => !(share.addonId === addonId && share.ownerUserId === userId && deletedIds.has(share.entryId)))))
   ]);
   return true;
 }

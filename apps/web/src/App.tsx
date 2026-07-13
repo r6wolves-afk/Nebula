@@ -1,8 +1,10 @@
 import {
   Activity,
+  Bell,
   Boxes,
   CheckCircle2,
   Cloud,
+  MessageCircle,
   Github,
   ExternalLink,
   FolderOpen,
@@ -23,9 +25,9 @@ import {
   UserPlus
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AddonManifest, AuthStatus, AuthUser, CatalogSource, InstalledAddon, PendingUserRequest, PlatformSummary, UserRole } from "@nebula/shared";
+import type { AddonManifest, AuthStatus, AuthUser, CatalogSource, InstalledAddon, NebulaChatMessage, NebulaNotification, PendingUserRequest, PlatformSummary, UserRole } from "@nebula/shared";
 
-type Section = "dashboard" | "store" | "installed" | "settings";
+type Section = "dashboard" | "chat" | "notifications" | "store" | "installed" | "settings";
 type RouteState =
   | { section: Section; addonId?: undefined }
   | { section: "addon"; addonId: string };
@@ -36,6 +38,9 @@ type GitHubAuthStatus = {
   catalogLocked?: boolean;
 };
 
+const chatPollIntervalMs = 5000;
+const notificationPollIntervalMs = 5000;
+
 const iconMap = {
   "notebook-tabs": NotebookTabs,
   "folder-open": FolderOpen,
@@ -44,6 +49,8 @@ const iconMap = {
 
 const navItems: Array<{ id: Section; label: string; icon: typeof Grid3X3 }> = [
   { id: "dashboard", label: "Dashboard", icon: Grid3X3 },
+  { id: "chat", label: "Nebula Chat", icon: MessageCircle },
+  { id: "notifications", label: "Notifications", icon: Bell },
   { id: "store", label: "App Store", icon: PackagePlus },
   { id: "installed", label: "Installed", icon: Boxes },
   { id: "settings", label: "Settings", icon: Settings }
@@ -55,12 +62,28 @@ function routeFromPath(pathname: string): RouteState {
     return { section: "addon", addonId: decodeURIComponent(addonMatch[1]) };
   }
 
+  if (pathname === "/chat") {
+    return { section: "chat" };
+  }
+
+  if (pathname === "/notifications") {
+    return { section: "notifications" };
+  }
+
   return { section: "dashboard" };
 }
 
 function pathForRoute(route: RouteState): string {
   if (route.section === "addon") {
     return `/apps/${encodeURIComponent(route.addonId)}`;
+  }
+
+  if (route.section === "chat") {
+    return "/chat";
+  }
+
+  if (route.section === "notifications") {
+    return "/notifications";
   }
 
   return "/";
@@ -124,6 +147,13 @@ export default function App() {
   const [newUser, setNewUser] = useState({ username: "", displayName: "", password: "", role: "user" as UserRole });
   const [userMessage, setUserMessage] = useState<string | null>(null);
   const [busyAddon, setBusyAddon] = useState<string | null>(null);
+  const [directoryUsers, setDirectoryUsers] = useState<Array<Pick<AuthUser, "id" | "username" | "displayName">>>([]);
+  const [chatMode, setChatMode] = useState<"general" | "direct">("general");
+  const [selectedDmUserId, setSelectedDmUserId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<NebulaChatMessage[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatMessage, setChatMessage] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<NebulaNotification[]>([]);
 
   async function loadAuthStatus() {
     setAuthStatus(await requestJson<AuthStatus>("/api/auth/status"));
@@ -170,6 +200,9 @@ export default function App() {
     setCatalog([]);
     setInstalled([]);
     setUsers([]);
+    setDirectoryUsers([]);
+    setChatMessages([]);
+    setNotifications([]);
     setPendingRequests([]);
     navigate({ section: "dashboard" });
   }
@@ -322,6 +355,72 @@ export default function App() {
     setPendingRequests(response.pendingRequests);
   }
 
+  async function loadDirectoryUsers() {
+    const response = await requestJson<{ users: Array<Pick<AuthUser, "id" | "username" | "displayName">> }>("/api/users/directory");
+    setDirectoryUsers(response.users);
+    setSelectedDmUserId((current) => current ?? response.users[0]?.id ?? null);
+  }
+
+  async function loadChatMessages(mode = chatMode, dmUserId = selectedDmUserId) {
+    if (mode === "direct") {
+      if (!dmUserId) {
+        setChatMessages([]);
+        return;
+      }
+
+      const response = await requestJson<{ messages: NebulaChatMessage[] }>(`/api/chat/direct/${encodeURIComponent(dmUserId)}`);
+      setChatMessages(response.messages);
+      return;
+    }
+
+    const response = await requestJson<{ messages: NebulaChatMessage[] }>("/api/chat/general");
+    setChatMessages(response.messages);
+  }
+
+  async function sendChatMessage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const body = chatDraft.trim();
+    if (!body) {
+      return;
+    }
+
+    setChatMessage(null);
+    try {
+      const url = chatMode === "direct" && selectedDmUserId
+        ? `/api/chat/direct/${encodeURIComponent(selectedDmUserId)}`
+        : "/api/chat/general";
+
+      await requestJson<{ message: NebulaChatMessage }>(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body })
+      });
+      setChatDraft("");
+      await Promise.all([loadChatMessages(), loadNotifications()]);
+    } catch {
+      setChatMessage("Nebula could not send that message.");
+    }
+  }
+
+  async function loadNotifications() {
+    const response = await requestJson<{ notifications: NebulaNotification[] }>("/api/notifications");
+    setNotifications(response.notifications);
+  }
+
+  async function markNotificationRead(notificationId: string) {
+    await requestJson<{ notification: NebulaNotification }>(`/api/notifications/${notificationId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ read: true })
+    });
+    await loadNotifications();
+  }
+
+  async function markAllNotificationsRead() {
+    const response = await requestJson<{ notifications: NebulaNotification[] }>("/api/notifications/read-all", { method: "POST" });
+    setNotifications(response.notifications);
+  }
+
   async function createAccount(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setUserMessage(null);
@@ -397,6 +496,43 @@ export default function App() {
     }
   }, [route.section, authStatus?.user?.role]);
 
+  useEffect(() => {
+    if ((route.section === "chat" || route.section === "notifications") && authStatus?.user) {
+      void loadDirectoryUsers();
+    }
+  }, [route.section, authStatus?.user?.id]);
+
+  useEffect(() => {
+    if (!authStatus?.user) {
+      return;
+    }
+
+    void loadNotifications();
+    const intervalId = window.setInterval(() => {
+      void loadNotifications();
+    }, notificationPollIntervalMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [authStatus?.user?.id]);
+
+  useEffect(() => {
+    if (route.section === "chat" && authStatus?.user) {
+      void loadChatMessages();
+    }
+  }, [route.section, chatMode, selectedDmUserId, authStatus?.user?.id]);
+
+  useEffect(() => {
+    if (route.section !== "chat" || !authStatus?.user) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadChatMessages();
+    }, chatPollIntervalMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [route.section, chatMode, selectedDmUserId, authStatus?.user?.id]);
+
   if (!authStatus) {
     return <AuthShell title="Loading Nebula" subtitle="Checking your session..." />;
   }
@@ -438,6 +574,7 @@ export default function App() {
   const activeTitle = route.section === "addon"
     ? activeAddon?.name ?? activeManifest?.name ?? "Add-on"
     : navItems.find((item) => item.id === route.section)?.label ?? "Dashboard";
+  const unreadNotifications = notifications.filter((notification) => !notification.readAt).length;
 
   return (
     <div className="app-shell">
@@ -464,6 +601,7 @@ export default function App() {
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
+                {item.id === "notifications" && unreadNotifications > 0 && <span className="nav-badge">{unreadNotifications}</span>}
               </button>
             );
           })}
@@ -540,6 +678,113 @@ export default function App() {
                 <EmptyState action={() => navigate({ section: "store" })} />
               )}
             </section>
+          </section>
+        )}
+
+        {route.section === "chat" && (
+          <section className="panel page-panel chat-panel">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Core Chat</span>
+                <h2>Messages</h2>
+              </div>
+              <div className="segmented-control" aria-label="Chat mode">
+                <button className={chatMode === "general" ? "active" : ""} onClick={() => setChatMode("general")} type="button">General</button>
+                <button className={chatMode === "direct" ? "active" : ""} onClick={() => setChatMode("direct")} type="button">DMs</button>
+              </div>
+            </div>
+
+            <div className="chat-layout">
+              <aside className="chat-sidebar">
+                <button className={chatMode === "general" ? "chat-target active" : "chat-target"} onClick={() => setChatMode("general")} type="button">
+                  <MessageCircle size={18} />
+                  <span>General server chat</span>
+                </button>
+                {directoryUsers.map((user) => (
+                  <button
+                    className={chatMode === "direct" && selectedDmUserId === user.id ? "chat-target active" : "chat-target"}
+                    key={user.id}
+                    onClick={() => {
+                      setChatMode("direct");
+                      setSelectedDmUserId(user.id);
+                    }}
+                    type="button"
+                  >
+                    <span className="avatar-dot">{user.displayName.slice(0, 1).toUpperCase()}</span>
+                    <span>{user.displayName}</span>
+                  </button>
+                ))}
+              </aside>
+
+              <section className="chat-thread" aria-live="polite">
+                <div className="message-list">
+                  {chatMessages.length > 0 ? chatMessages.map((message) => (
+                    <article className={message.senderUserId === currentUser.id ? "chat-message own" : "chat-message"} key={message.id}>
+                      <div>
+                        <strong>{message.senderDisplayName}</strong>
+                        <time>{new Date(message.createdAt).toLocaleString()}</time>
+                      </div>
+                      <p>{message.body}</p>
+                    </article>
+                  )) : (
+                    <div className="empty-state compact-empty">
+                      <MessageCircle size={28} />
+                      <h3>No messages yet</h3>
+                    </div>
+                  )}
+                </div>
+                <form className="chat-composer" onSubmit={sendChatMessage}>
+                  <input
+                    disabled={chatMode === "direct" && !selectedDmUserId}
+                    onChange={(event) => setChatDraft(event.target.value)}
+                    placeholder={chatMode === "direct" ? "Message this user" : "Message everyone"}
+                    value={chatDraft}
+                  />
+                  <button className="primary-action" disabled={chatMode === "direct" && !selectedDmUserId} type="submit">
+                    <MessageCircle size={18} />
+                    Send
+                  </button>
+                </form>
+                {chatMessage && <p className="github-message">{chatMessage}</p>}
+              </section>
+            </div>
+          </section>
+        )}
+
+        {route.section === "notifications" && (
+          <section className="panel page-panel notifications-panel">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Inbox</span>
+                <h2>Notifications</h2>
+              </div>
+              <button className="secondary-action" disabled={unreadNotifications === 0} onClick={markAllNotificationsRead} type="button">
+                <CheckCircle2 size={18} />
+                Mark all read
+              </button>
+            </div>
+            <div className="notification-list">
+              {notifications.length > 0 ? notifications.map((notification) => (
+                <article className={notification.readAt ? "notification-row" : "notification-row unread"} key={notification.id}>
+                  <Bell size={18} />
+                  <div>
+                    <strong>{notification.title}</strong>
+                    <p>{notification.body}</p>
+                    <time>{new Date(notification.createdAt).toLocaleString()}</time>
+                  </div>
+                  {!notification.readAt && (
+                    <button className="secondary-action compact-action" onClick={() => markNotificationRead(notification.id)} type="button">
+                      Mark read
+                    </button>
+                  )}
+                </article>
+              )) : (
+                <div className="empty-state compact-empty">
+                  <Bell size={28} />
+                  <h3>No notifications</h3>
+                </div>
+              )}
+            </div>
           </section>
         )}
 

@@ -8,6 +8,12 @@ import path from "node:path";
 import { z } from "zod";
 import type { AuthUser } from "@nebula/shared";
 import {
+  createDirectChatMessage,
+  createGeneralChatMessage,
+  listDirectChatMessages,
+  listGeneralChatMessages
+} from "./chat-store.js";
+import {
   clearCatalogCache,
   findCatalogAddon,
   getCatalog,
@@ -17,7 +23,20 @@ import {
   setRuntimeCatalogUrl
 } from "./catalog.js";
 import { readAddonStorage, writeAddonStorage } from "./addon-storage.js";
-import { createAddonFolder, deleteAddonFileEntry, getAddonFile, listAddonFileEntries, saveAddonFile, updateAddonFileEntry } from "./addon-files.js";
+import {
+  createAddonFileShare,
+  createAddonFolder,
+  deleteAddonFileEntry,
+  deleteAddonFileShare,
+  getAddonFile,
+  getSharedAddonFile,
+  listAddonFileEntries,
+  listAddonFileSharesByMe,
+  listAddonFileSharesWithMe,
+  listSharedAddonFileEntries,
+  saveAddonFile,
+  updateAddonFileEntry
+} from "./addon-files.js";
 import { getInstalledAddonFilePath, installAddon, listInstalledAddons, uninstallAddon } from "./addon-store.js";
 import {
   approvePendingUserRequest,
@@ -39,6 +58,7 @@ import {
   saveGitHubConnection,
   setRuntimeGitHubToken
 } from "./github-auth.js";
+import { listNotifications, markAllNotificationsRead, markNotificationRead } from "./notification-store.js";
 
 const server = Fastify({ logger: true });
 const host = process.env.NEBULA_HOST ?? "127.0.0.1";
@@ -154,6 +174,26 @@ function entryMutationReply(reply: { code: (statusCode: number) => { send: (payl
   return reply.code(400).send({ error: "File operation failed" });
 }
 
+function shareMutationReply(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, result: { status: string; share?: unknown }) {
+  if (result.status === "ok") {
+    return reply.code(201).send({ share: result.share });
+  }
+
+  if (result.status === "not-found") {
+    return reply.code(404).send({ error: "File entry was not found" });
+  }
+
+  if (result.status === "invalid-target") {
+    return reply.code(400).send({ error: "Share target is invalid" });
+  }
+
+  if (result.status === "duplicate-share") {
+    return reply.code(409).send({ error: "That share already exists" });
+  }
+
+  return reply.code(400).send({ error: "Share operation failed" });
+}
+
 server.get("/api/health", async () => ({ status: "ok", name: "nebula" }));
 
 server.get("/api/auth/status", async (request) => ({
@@ -219,6 +259,21 @@ server.get("/api/users", async (request, reply) => {
   return { users: await listUsers(), pendingRequests: await listPendingUserRequests() };
 });
 
+server.get("/api/users/directory", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const users = await listUsers();
+  return {
+    users: users
+      .filter((directoryUser) => directoryUser.id !== user.id)
+      .map((directoryUser) => ({
+        id: directoryUser.id,
+        username: directoryUser.username,
+        displayName: directoryUser.displayName
+      }))
+  };
+});
+
 server.post("/api/users", async (request, reply) => {
   const admin = await requireAdmin(request, reply);
   if (!admin) return;
@@ -274,6 +329,74 @@ server.delete("/api/users/requests/:id", async (request, reply) => {
   }
 
   return reply.code(204).send();
+});
+
+server.get("/api/chat/general", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  return { messages: await listGeneralChatMessages() };
+});
+
+server.post("/api/chat/general", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const body = z.object({ body: z.string().trim().min(1).max(2000) }).parse(request.body);
+  const message = await createGeneralChatMessage(user, body.body, await listUsers());
+  return reply.code(201).send({ message });
+});
+
+server.get("/api/chat/direct/:userId", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ userId: z.string().min(1) }).parse(request.params);
+  const targetUser = (await listUsers()).find((directoryUser) => directoryUser.id === params.userId);
+
+  if (!targetUser || targetUser.id === user.id) {
+    return reply.code(404).send({ error: "Chat user was not found" });
+  }
+
+  return { messages: await listDirectChatMessages(user.id, targetUser.id), user: targetUser };
+});
+
+server.post("/api/chat/direct/:userId", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ userId: z.string().min(1) }).parse(request.params);
+  const body = z.object({ body: z.string().trim().min(1).max(2000) }).parse(request.body);
+  const targetUser = (await listUsers()).find((directoryUser) => directoryUser.id === params.userId);
+
+  if (!targetUser || targetUser.id === user.id) {
+    return reply.code(404).send({ error: "Chat user was not found" });
+  }
+
+  const message = await createDirectChatMessage(user, targetUser, body.body);
+  return reply.code(201).send({ message });
+});
+
+server.get("/api/notifications", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  return { notifications: await listNotifications(user.id) };
+});
+
+server.post("/api/notifications/read-all", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  return { notifications: await markAllNotificationsRead(user.id) };
+});
+
+server.patch("/api/notifications/:id", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const body = z.object({ read: z.literal(true) }).parse(request.body);
+  const notification = body.read ? await markNotificationRead(user.id, params.id) : undefined;
+
+  if (!notification) {
+    return reply.code(404).send({ error: "Notification was not found" });
+  }
+
+  return { notification };
 });
 
 server.get("/api/catalog", async (request, reply) => {
@@ -447,6 +570,93 @@ server.patch("/api/addons/:id/user-files/:entryId", async (request, reply) => {
   return entryMutationReply(reply, result);
 });
 
+server.post("/api/addons/:id/user-files/:entryId/shares", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    entryId: z.string().uuid()
+  }).parse(request.params);
+  const body = z.object({
+    scope: z.enum(["user", "server"]),
+    targetUserId: z.string().min(1).optional(),
+    permission: z.enum(["viewer"]).default("viewer")
+  }).parse(request.body);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  if (body.scope === "user") {
+    const targetUser = (await listUsers()).find((directoryUser) => directoryUser.id === body.targetUserId);
+    if (!targetUser || targetUser.id === user.id) {
+      return reply.code(400).send({ error: "Share target is invalid" });
+    }
+  }
+
+  const result = await createAddonFileShare({
+    addonId: params.id,
+    entryId: params.entryId,
+    ownerUserId: user.id,
+    scope: body.scope,
+    targetUserId: body.scope === "user" ? body.targetUserId : undefined
+  });
+
+  return shareMutationReply(reply, result);
+});
+
+server.get("/api/addons/:id/shared-with-me", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().regex(/^[a-z0-9-]+$/) }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+  return { items: await listAddonFileSharesWithMe(user.id, params.id) };
+});
+
+server.get("/api/addons/:id/shared-by-me", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().regex(/^[a-z0-9-]+$/) }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+  return { items: await listAddonFileSharesByMe(user.id, params.id) };
+});
+
+server.get("/api/addons/:id/shared-with-me/:shareId/files", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    shareId: z.string().uuid()
+  }).parse(request.params);
+  const query = z.object({ parentId: z.string().uuid().nullable().optional() }).parse(request.query);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const listing = await listSharedAddonFileEntries(user.id, params.id, params.shareId, query.parentId);
+  if (!listing) {
+    return reply.code(404).send({ error: "Shared folder was not found" });
+  }
+
+  return {
+    ...listing,
+    files: listing.entries.filter((entry) => entry.type === "file")
+  };
+});
+
+server.delete("/api/addons/:id/user-files/:entryId/shares/:shareId", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    entryId: z.string().uuid(),
+    shareId: z.string().uuid()
+  }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const deleted = await deleteAddonFileShare(user.id, params.id, params.entryId, params.shareId);
+  if (!deleted) {
+    return reply.code(404).send({ error: "Share was not found" });
+  }
+
+  return reply.code(204).send();
+});
+
 server.get("/api/addons/:id/user-files/:entryId", async (request, reply) => {
   const user = await requireUser(request, reply);
   if (!user) return;
@@ -456,7 +666,7 @@ server.get("/api/addons/:id/user-files/:entryId", async (request, reply) => {
   }).parse(request.params);
   if (!(await requireInstalledAddon(params.id, reply))) return;
 
-  const storedFile = await getAddonFile(user.id, params.id, params.entryId);
+  const storedFile = await getAddonFile(user.id, params.id, params.entryId) ?? await getSharedAddonFile(user.id, params.id, params.entryId);
   if (!storedFile) {
     return reply.code(404).send({ error: "File was not found" });
   }

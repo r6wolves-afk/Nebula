@@ -93,6 +93,46 @@ export type AddonFolderRecord = {
 
 export type AddonFileEntry = AddonFileRecord | AddonFolderRecord;
 
+export type AddonFileShareScope = "user" | "server";
+
+export type AddonFileSharePermission = "viewer";
+
+export type AddonFileShare = {
+  id: string;
+  addonId: string;
+  entryId: string;
+  ownerUserId: string;
+  scope: AddonFileShareScope;
+  targetUserId?: string;
+  permission: AddonFileSharePermission;
+  createdAt: string;
+};
+
+export type NebulaChatScope = "general" | "direct";
+
+export type NebulaChatMessage = {
+  id: string;
+  scope: NebulaChatScope;
+  senderUserId: string;
+  senderDisplayName: string;
+  recipientUserId?: string;
+  body: string;
+  createdAt: string;
+};
+
+export type NebulaNotificationType = "chat" | "system";
+
+export type NebulaNotification = {
+  id: string;
+  userId: string;
+  type: NebulaNotificationType;
+  title: string;
+  body: string;
+  link?: string;
+  readAt?: string;
+  createdAt: string;
+};
+
 export type PlatformSummary = {
   installedCount: number;
   availableCount: number;
