@@ -134,6 +134,7 @@ export type NebulaNotification = {
 };
 
 export type PlatformSummary = {
+  version: string;
   installedCount: number;
   availableCount: number;
   enabledCount: number;

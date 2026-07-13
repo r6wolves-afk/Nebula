@@ -138,6 +138,7 @@ export default function App() {
   const [storeMessage, setStoreMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [summary, setSummary] = useState<PlatformSummary>({
+    version: "unknown",
     installedCount: 0,
     availableCount: 0,
     enabledCount: 0
@@ -910,6 +911,7 @@ export default function App() {
                   <h2>Core</h2>
                 </div>
               </div>
+              <SettingRow icon={CheckCircle2} label="Version" value={`v${summary.version}`} />
               <SettingRow icon={HardDrive} label="Data path" value=".nebula-data" />
               <SettingRow icon={Cloud} label="Server mode" value="Local development" />
               <SettingRow icon={Sparkles} label="Add-on runtime" value="UI modules first" />

@@ -3,7 +3,7 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { createReadStream, existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { AuthUser } from "@nebula/shared";
@@ -65,6 +65,7 @@ const host = process.env.NEBULA_HOST ?? "127.0.0.1";
 const port = Number(process.env.NEBULA_PORT ?? 8787);
 const webDist = process.env.NEBULA_WEB_DIST ?? path.resolve(process.cwd(), "apps/web/dist");
 const sessionCookie = "nebula_session";
+let cachedPlatformVersion: string | undefined;
 
 await server.register(cors, { origin: true });
 await server.register(multipart, {
@@ -93,6 +94,26 @@ function sessionCookieHeader(token: string, expiresAt: string) {
 
 function clearSessionCookieHeader() {
   return `${sessionCookie}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+}
+
+async function getPlatformVersion() {
+  const environmentVersion = process.env.NEBULA_VERSION?.trim();
+  if (environmentVersion) {
+    return environmentVersion;
+  }
+
+  if (cachedPlatformVersion) {
+    return cachedPlatformVersion;
+  }
+
+  try {
+    const packageJson = JSON.parse(await readFile(path.resolve(process.cwd(), "package.json"), "utf8")) as { version?: unknown };
+    cachedPlatformVersion = typeof packageJson.version === "string" ? packageJson.version : "unknown";
+  } catch {
+    cachedPlatformVersion = "unknown";
+  }
+
+  return cachedPlatformVersion;
 }
 
 async function getRequestUser(request: { headers: { cookie?: string } }) {
@@ -733,6 +754,7 @@ server.get("/api/summary", async (request, reply) => {
   const catalog = await getCatalog();
   const installed = await listInstalledAddons();
   return {
+    version: await getPlatformVersion(),
     installedCount: installed.length,
     availableCount: catalog.length,
     enabledCount: installed.filter((addon) => addon.status === "enabled").length
