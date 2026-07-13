@@ -599,6 +599,7 @@ export default function App() {
   const activeTitle = route.section === "addon"
     ? activeAddon?.name ?? activeManifest?.name ?? "Add-on"
     : navItems.find((item) => item.id === route.section)?.label ?? "Dashboard";
+  const visibleNavItems = canManagePlatform ? navItems : navItems.filter((item) => item.id !== "store");
   const unreadNotifications = notifications.filter((notification) => !notification.readAt).length;
 
   return (
@@ -615,7 +616,7 @@ export default function App() {
         </div>
 
         <nav className="nav-list" aria-label="Primary navigation">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -662,15 +663,17 @@ export default function App() {
             <div className="hero-panel">
               <div className="hero-copy">
                 <span className="eyebrow">Local Development</span>
-                <h2>Nebula is your server home base.</h2>
+                <h2>Welcome {currentUser.displayName} to Nebula.</h2>
                 <p>
                   Build the portal locally, install add-ons into Nebula state, then package the same core into one
                   server container.
                 </p>
-                <button className="primary-action" onClick={() => navigate({ section: "store" })} type="button">
-                  <PackagePlus size={18} />
-                  Open App Store
-                </button>
+                {canManagePlatform && (
+                  <button className="primary-action" onClick={() => navigate({ section: "store" })} type="button">
+                    <PackagePlus size={18} />
+                    Open App Store
+                  </button>
+                )}
               </div>
               <div className="orbital-map" aria-hidden="true">
                 <span className="orbit one" />
@@ -682,9 +685,13 @@ export default function App() {
               </div>
             </div>
 
-            <MetricCard icon={Gauge} label="Installed" value={summary.installedCount} />
-            <MetricCard icon={PackagePlus} label="Available" value={summary.availableCount} />
-            <MetricCard icon={CheckCircle2} label="Enabled" value={summary.enabledCount} />
+            {canManagePlatform && (
+              <>
+                <MetricCard icon={Gauge} label="Installed" value={summary.installedCount} />
+                <MetricCard icon={PackagePlus} label="Available" value={summary.availableCount} />
+                <MetricCard icon={CheckCircle2} label="Enabled" value={summary.enabledCount} />
+              </>
+            )}
 
             <section className="panel wide-panel">
               <div className="section-heading">
@@ -1067,6 +1074,12 @@ function MetricCard({ icon: Icon, label, value }: { icon: typeof Gauge; label: s
 function AuthShell({ children, subtitle, title }: { children?: React.ReactNode; subtitle: string; title: string }) {
   return (
     <main className="auth-shell">
+      <div className="auth-nebula" aria-hidden="true">
+        <span className="nebula-cloud cloud-one" />
+        <span className="nebula-cloud cloud-two" />
+        <span className="nebula-cloud cloud-three" />
+        <span className="nebula-rift" />
+      </div>
       <section className="auth-card panel">
         <div className="brand-mark">
           <Cloud size={25} />

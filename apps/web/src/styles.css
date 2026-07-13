@@ -56,17 +56,198 @@ select {
 }
 
 .auth-shell {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
   display: grid;
   place-items: center;
   min-height: 100vh;
   padding: 24px;
+  background:
+    radial-gradient(ellipse at 48% 46%, rgba(126, 43, 255, 0.38), transparent 42%),
+    radial-gradient(ellipse at 18% 24%, rgba(255, 79, 216, 0.32), transparent 30%),
+    radial-gradient(ellipse at 78% 70%, rgba(77, 216, 255, 0.22), transparent 32%),
+    linear-gradient(135deg, #02020a 0%, #100723 48%, #01030a 100%);
+  background-position: 50% 46%, 0% 0%, 100% 70%, 0 0;
+  background-size: 130% 130%, 120% 120%, 120% 120%, 100% 100%;
+}
+
+.auth-shell::before,
+.auth-shell::after {
+  position: absolute;
+  z-index: 1;
+  content: "";
+  pointer-events: none;
+}
+
+.auth-shell::before {
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 48%, transparent 0 34%, rgba(0, 0, 0, 0.48) 74%, rgba(0, 0, 0, 0.82) 100%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.46), transparent 24%, transparent 74%, rgba(0, 0, 0, 0.48));
+}
+
+.auth-shell::after {
+  inset: 0;
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.8px),
+    radial-gradient(circle, rgba(217, 196, 255, 0.72) 0 1px, transparent 1.6px),
+    radial-gradient(circle, rgba(77, 216, 255, 0.5) 0 1px, transparent 1.7px);
+  background-position: 0 0, 38px 64px, 96px 28px;
+  background-size: 128px 128px, 188px 188px, 260px 260px;
+  opacity: 0.5;
+  transform: translate3d(-4%, -4%, 0);
+  animation: auth-stars-drift 90s linear infinite;
+  will-change: transform;
+}
+
+.auth-nebula {
+  position: absolute;
+  inset: -18%;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transform: translateZ(0);
+}
+
+.nebula-cloud {
+  position: absolute;
+  display: block;
+  border-radius: 48% 52% 46% 54%;
+  filter: blur(14px) saturate(1.18);
+  mix-blend-mode: screen;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.nebula-cloud::before {
+  position: absolute;
+  inset: 16% 10%;
+  content: "";
+  background:
+    radial-gradient(ellipse at 34% 56%, rgba(0, 0, 0, 0.76), transparent 28%),
+    radial-gradient(ellipse at 58% 40%, rgba(3, 2, 14, 0.72), transparent 24%),
+    linear-gradient(128deg, transparent 22%, rgba(0, 0, 0, 0.72) 43%, transparent 62%);
+  border-radius: inherit;
+  filter: blur(8px);
+  opacity: 0.82;
+  mix-blend-mode: multiply;
+}
+
+.nebula-cloud::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background:
+    radial-gradient(circle at 24% 32%, rgba(255, 255, 255, 0.95) 0 2px, transparent 3px),
+    radial-gradient(circle at 38% 64%, rgba(255, 210, 255, 0.86) 0 1.4px, transparent 3px),
+    radial-gradient(circle at 58% 42%, rgba(255, 255, 255, 0.9) 0 1.7px, transparent 3.2px),
+    radial-gradient(circle at 72% 56%, rgba(255, 180, 240, 0.82) 0 1.5px, transparent 3px),
+    radial-gradient(ellipse at 48% 52%, rgba(255, 255, 255, 0.18), transparent 18%);
+  opacity: 0.68;
+  mix-blend-mode: screen;
+}
+
+.cloud-one {
+  top: 4%;
+  left: -8%;
+  width: 76vw;
+  height: 52vw;
+  min-width: 760px;
+  min-height: 520px;
+  background:
+    radial-gradient(ellipse at 22% 62%, rgba(255, 79, 216, 0.72), transparent 34%),
+    radial-gradient(ellipse at 52% 48%, rgba(172, 70, 255, 0.78), transparent 38%),
+    radial-gradient(ellipse at 72% 56%, rgba(65, 102, 255, 0.62), transparent 34%),
+    radial-gradient(ellipse at 48% 74%, rgba(255, 180, 84, 0.24), transparent 28%);
+  opacity: 0.92;
+  animation: auth-cloud-one 26s ease-in-out infinite alternate;
+}
+
+.cloud-two {
+  right: -14%;
+  bottom: -4%;
+  width: 66vw;
+  height: 50vw;
+  min-width: 680px;
+  min-height: 500px;
+  background:
+    radial-gradient(ellipse at 28% 38%, rgba(77, 216, 255, 0.46), transparent 34%),
+    radial-gradient(ellipse at 46% 58%, rgba(99, 72, 255, 0.72), transparent 42%),
+    radial-gradient(ellipse at 70% 44%, rgba(255, 79, 216, 0.58), transparent 34%);
+  opacity: 0.78;
+  animation: auth-cloud-two 32s ease-in-out infinite alternate;
+}
+
+.cloud-three {
+  top: 24%;
+  left: 24%;
+  width: 52vw;
+  height: 36vw;
+  min-width: 560px;
+  min-height: 380px;
+  background:
+    radial-gradient(ellipse at 28% 56%, rgba(255, 255, 255, 0.22), transparent 18%),
+    radial-gradient(ellipse at 42% 44%, rgba(255, 79, 216, 0.62), transparent 34%),
+    radial-gradient(ellipse at 62% 58%, rgba(83, 126, 255, 0.54), transparent 38%);
+  opacity: 0.62;
+  animation: auth-cloud-three 22s ease-in-out infinite alternate;
+}
+
+.nebula-rift {
+  position: absolute;
+  top: 28%;
+  left: 15%;
+  display: block;
+  width: 78vw;
+  height: 30vw;
+  min-width: 760px;
+  min-height: 290px;
+  background:
+    radial-gradient(ellipse at 18% 56%, rgba(0, 0, 0, 0.82), transparent 22%),
+    radial-gradient(ellipse at 42% 45%, rgba(0, 0, 0, 0.76), transparent 18%),
+    radial-gradient(ellipse at 66% 58%, rgba(0, 0, 0, 0.64), transparent 18%),
+    linear-gradient(112deg, transparent 12%, rgba(0, 0, 0, 0.72) 30%, rgba(0, 0, 0, 0.28) 48%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(10px);
+  opacity: 0.66;
+  mix-blend-mode: multiply;
+  animation: auth-rift-drift 30s ease-in-out infinite alternate;
+  will-change: transform;
 }
 
 .auth-card {
+  position: relative;
+  z-index: 2;
   display: grid;
   gap: 14px;
   width: min(440px, 100%);
   padding: 28px;
+  animation: auth-card-in 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.auth-card .brand-mark {
+  animation: auth-mark-pulse 2.8s ease-in-out infinite;
+}
+
+.auth-card > *:not(.brand-mark) {
+  animation: auth-content-in 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.auth-card > :nth-child(2) {
+  animation-delay: 0.1s;
+}
+
+.auth-card > :nth-child(3) {
+  animation-delay: 0.18s;
+}
+
+.auth-card > :nth-child(4) {
+  animation-delay: 0.26s;
+}
+
+.auth-card > :nth-child(n + 5) {
+  animation-delay: 0.34s;
 }
 
 .auth-card h1 {
@@ -120,6 +301,7 @@ select {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
   min-height: 100vh;
+  animation: app-shell-in 0.48s ease-out both;
 }
 
 .sidebar {
@@ -394,6 +576,138 @@ select {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes auth-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(34px) scale(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes auth-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes app-shell-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-mark-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 24px rgba(155, 92, 255, 0.5);
+    transform: scale(1);
+  }
+
+  50% {
+    box-shadow: 0 0 34px rgba(77, 216, 255, 0.36);
+    transform: scale(1.04);
+  }
+}
+
+@keyframes auth-space-shift {
+  0% {
+    background-position: 50% 46%, 0% 0%, 100% 70%, 0 0;
+  }
+
+  100% {
+    background-position: 46% 42%, 10% 8%, 88% 62%, 0 0;
+  }
+}
+
+@keyframes auth-cloud-one {
+  0% {
+    transform: translate3d(-3%, 2%, 0) rotate(-4deg) scale(1.02);
+  }
+
+  50% {
+    transform: translate3d(5%, -3%, 0) rotate(2deg) scale(1.1);
+  }
+
+  100% {
+    transform: translate3d(10%, 3%, 0) rotate(6deg) scale(1.05);
+  }
+}
+
+@keyframes auth-cloud-two {
+  0% {
+    transform: translate3d(4%, 2%, 0) rotate(5deg) scale(1.03);
+  }
+
+  50% {
+    transform: translate3d(-5%, -4%, 0) rotate(-2deg) scale(1.12);
+  }
+
+  100% {
+    transform: translate3d(-11%, 2%, 0) rotate(-7deg) scale(1.06);
+  }
+}
+
+@keyframes auth-cloud-three {
+  0% {
+    transform: translate3d(-2%, -2%, 0) rotate(7deg) scale(0.98);
+  }
+
+  100% {
+    transform: translate3d(8%, 5%, 0) rotate(-5deg) scale(1.12);
+  }
+}
+
+@keyframes auth-rift-drift {
+  0% {
+    transform: translate3d(-4%, 4%, 0) rotate(-12deg) scale(1);
+  }
+
+  100% {
+    transform: translate3d(8%, -3%, 0) rotate(-4deg) scale(1.12);
+  }
+}
+
+@keyframes auth-stars-drift {
+  from {
+    transform: translate3d(-4%, -4%, 0);
+  }
+
+  to {
+    transform: translate3d(4%, 6%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-shell,
+  .auth-shell::before,
+  .auth-shell::after,
+  .auth-nebula,
+  .nebula-cloud,
+  .nebula-rift,
+  .auth-card,
+  .auth-card .brand-mark,
+  .loading-spinner {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
   }
 }
 
