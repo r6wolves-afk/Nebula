@@ -1,0 +1,19 @@
+{
+  "addons": [
+    {
+      "id": "notes",
+      "name": "Nebula Notes",
+      "version": "0.1.0",
+      "type": "ui",
+      "summary": "Private notes inside Nebula.",
+      "description": "A frontend-only notes add-on for the Nebula portal.",
+      "icon": "notebook-tabs",
+      "color": "#9b5cff",
+      "route": "/apps/notes",
+      "entry": "frontend/index.html",
+      "permissions": ["storage.read", "storage.write"],
+      "repositoryUrl": "https://github.com/r6wolves-afk/Nebula-Notes",
+      "packageUrl": "https://api.github.com/repos/r6wolves-afk/Nebula-Notes/zipball/main"
+    }
+  ]
+}

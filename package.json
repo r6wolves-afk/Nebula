@@ -1,0 +1,19 @@
+{
+  "name": "nebula",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build -w @nebula/shared && concurrently -n api,web -c cyan,green \"npm run dev -w @nebula/api\" \"npm run dev -w @nebula/web\"",
+    "build": "npm run build -w @nebula/shared && npm run build -w @nebula/api && npm run build -w @nebula/web",
+    "check": "npm run check -w @nebula/shared && npm run check -w @nebula/api && npm run check -w @nebula/web"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.2"
+  }
+}

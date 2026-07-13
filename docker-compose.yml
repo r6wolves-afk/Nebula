@@ -1,0 +1,16 @@
+services:
+  nebula:
+    build: .
+    container_name: nebula
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      NEBULA_HOST: 0.0.0.0
+      NEBULA_PORT: 8787
+      NEBULA_DATA_DIR: /data
+    volumes:
+      - nebula-data:/data
+
+volumes:
+  nebula-data:
