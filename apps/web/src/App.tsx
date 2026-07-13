@@ -62,6 +62,18 @@ function routeFromPath(pathname: string): RouteState {
     return { section: "addon", addonId: decodeURIComponent(addonMatch[1]) };
   }
 
+  if (pathname === "/store") {
+    return { section: "store" };
+  }
+
+  if (pathname === "/installed") {
+    return { section: "installed" };
+  }
+
+  if (pathname === "/settings") {
+    return { section: "settings" };
+  }
+
   if (pathname === "/chat") {
     return { section: "chat" };
   }
@@ -84,6 +96,18 @@ function pathForRoute(route: RouteState): string {
 
   if (route.section === "notifications") {
     return "/notifications";
+  }
+
+  if (route.section === "store") {
+    return "/store";
+  }
+
+  if (route.section === "installed") {
+    return "/installed";
+  }
+
+  if (route.section === "settings") {
+    return "/settings";
   }
 
   return "/";
@@ -910,8 +934,9 @@ export default function App() {
                   <span className="eyebrow">Platform</span>
                   <h2>Core</h2>
                 </div>
+                <span className="soft-pill">v{summary.version}</span>
               </div>
-              <SettingRow icon={CheckCircle2} label="Version" value={`v${summary.version}`} />
+              <SettingRow icon={CheckCircle2} label="Core version" value={`v${summary.version}`} />
               <SettingRow icon={HardDrive} label="Data path" value=".nebula-data" />
               <SettingRow icon={Cloud} label="Server mode" value="Local development" />
               <SettingRow icon={Sparkles} label="Add-on runtime" value="UI modules first" />
