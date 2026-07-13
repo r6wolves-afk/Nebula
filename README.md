@@ -24,6 +24,16 @@ Open the portal at http://localhost:5173.
 - `npm run build` builds shared types, API, and web UI.
 - `npm run check` runs TypeScript checks across the workspace.
 
+## Docker Image
+
+Pushes to `main` publish a Docker image to GitHub Container Registry:
+
+```text
+ghcr.io/r6wolves-afk/nebula:latest
+```
+
+Use `portainer-stack.yml` as the Portainer stack template after the image publish workflow finishes.
+
 ## Server Shape
 
 The intended server layout is:

@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  nebula:
+    image: ghcr.io/r6wolves-afk/nebula:latest
+    ports:
+      - "8787:8787"
+    environment:
+      NEBULA_HOST: 0.0.0.0
+      NEBULA_PORT: 8787
+      NEBULA_DATA_DIR: /data
+      NEBULA_GITHUB_OWNER: r6wolves-afk
+      NEBULA_ADDON_REPO_PREFIX: Nebula-
+      NEBULA_GITHUB_DISCOVERY: "true"
+    volumes:
+      - nebula-data:/data
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+volumes:
+  nebula-data:
