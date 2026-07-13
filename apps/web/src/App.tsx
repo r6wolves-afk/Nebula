@@ -9,17 +9,21 @@ import {
   Gauge,
   Grid3X3,
   HardDrive,
+  LogOut,
   NotebookTabs,
   PackagePlus,
+  RefreshCw,
   Search,
   Settings,
   ShieldCheck,
   Sparkles,
   Undo2,
-  Trash2
+  Trash2,
+  UserCheck,
+  UserPlus
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AddonManifest, CatalogSource, InstalledAddon, PlatformSummary } from "@nebula/shared";
+import type { AddonManifest, AuthStatus, AuthUser, CatalogSource, InstalledAddon, PendingUserRequest, PlatformSummary, UserRole } from "@nebula/shared";
 
 type Section = "dashboard" | "store" | "installed" | "settings";
 type RouteState =
@@ -90,6 +94,10 @@ function compareVersions(left: string, right: string) {
 }
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authView, setAuthView] = useState<"login" | "register">("login");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [route, setRoute] = useState<RouteState>(() => routeFromPath(window.location.pathname));
   const [catalog, setCatalog] = useState<AddonManifest[]>([]);
   const [catalogSource, setCatalogSource] = useState<CatalogSource>({
@@ -102,14 +110,69 @@ export default function App() {
   const [githubCatalogUrl, setGithubCatalogUrl] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [githubBusy, setGithubBusy] = useState(false);
+  const [showGitHubSettings, setShowGitHubSettings] = useState(false);
   const [githubMessage, setGithubMessage] = useState<string | null>(null);
   const [storeMessage, setStoreMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [summary, setSummary] = useState<PlatformSummary>({
     installedCount: 0,
     availableCount: 0,
     enabledCount: 0
   });
+  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<PendingUserRequest[]>([]);
+  const [newUser, setNewUser] = useState({ username: "", displayName: "", password: "", role: "user" as UserRole });
+  const [userMessage, setUserMessage] = useState<string | null>(null);
   const [busyAddon, setBusyAddon] = useState<string | null>(null);
+
+  async function loadAuthStatus() {
+    setAuthStatus(await requestJson<AuthStatus>("/api/auth/status"));
+  }
+
+  async function submitAuth(mode: "setup" | "login" | "register", values: { username: string; displayName?: string; password: string }) {
+    setAuthBusy(true);
+    setAuthMessage(null);
+
+    try {
+      if (mode === "register") {
+        await requestJson<{ request: PendingUserRequest }>("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(values)
+        });
+        setAuthView("login");
+        setAuthMessage("Account request sent. An admin needs to approve it before you can sign in.");
+        return;
+      }
+
+      const response = await requestJson<{ user: AuthUser }>(mode === "setup" ? "/api/auth/setup" : "/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values)
+      });
+
+      setAuthStatus({ setupRequired: false, user: response.user });
+      await refresh();
+    } catch {
+      setAuthMessage(mode === "setup"
+        ? "Nebula could not create that admin account."
+        : mode === "register"
+          ? "Nebula could not submit that request. Use a unique username and an 8+ character password."
+          : "Invalid username or password.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setAuthStatus({ setupRequired: false, user: null });
+    setCatalog([]);
+    setInstalled([]);
+    setUsers([]);
+    setPendingRequests([]);
+    navigate({ section: "dashboard" });
+  }
 
   async function refresh() {
     const [catalogResponse, installedResponse, summaryResponse, githubStatusResponse] = await Promise.all([
@@ -130,8 +193,14 @@ export default function App() {
   }
 
   useEffect(() => {
-    void refresh();
+    void loadAuthStatus();
   }, []);
+
+  useEffect(() => {
+    if (authStatus?.user) {
+      void refresh();
+    }
+  }, [authStatus?.user?.id]);
 
   useEffect(() => {
     function handlePopState() {
@@ -167,6 +236,31 @@ export default function App() {
       setStoreMessage({ kind: "error", text: `Nebula could not install ${addon?.name ?? "that add-on"}. Check the package URL and GitHub access.` });
     } finally {
       setBusyAddon(null);
+    }
+  }
+
+  async function refreshCatalog() {
+    setCatalogRefreshing(true);
+    setStoreMessage(null);
+
+    try {
+      const catalogResponse = await requestJson<{ addons: AddonManifest[]; source: CatalogSource }>("/api/catalog/refresh", { method: "POST" });
+      const [installedResponse, summaryResponse, githubStatusResponse] = await Promise.all([
+        requestJson<{ addons: InstalledAddon[] }>("/api/addons/installed"),
+        requestJson<PlatformSummary>("/api/summary"),
+        requestJson<GitHubAuthStatus>("/api/github/status")
+      ]);
+
+      setCatalog(catalogResponse.addons);
+      setCatalogSource(catalogResponse.source);
+      setInstalled(installedResponse.addons);
+      setSummary(summaryResponse);
+      setGithubAuth(githubStatusResponse);
+      setStoreMessage({ kind: "success", text: "Catalog refreshed from source." });
+    } catch {
+      setStoreMessage({ kind: "error", text: "Nebula could not refresh the catalog." });
+    } finally {
+      setCatalogRefreshing(false);
     }
   }
 
@@ -218,8 +312,126 @@ export default function App() {
     }
   }
 
+  async function loadUsers() {
+    if (authStatus?.user?.role !== "admin") {
+      return;
+    }
+
+    const response = await requestJson<{ users: AuthUser[]; pendingRequests: PendingUserRequest[] }>("/api/users");
+    setUsers(response.users);
+    setPendingRequests(response.pendingRequests);
+  }
+
+  async function createAccount(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setUserMessage(null);
+
+    try {
+      await requestJson<{ user: AuthUser }>("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: newUser.username,
+          displayName: newUser.displayName || undefined,
+          password: newUser.password,
+          role: newUser.role
+        })
+      });
+      setNewUser({ username: "", displayName: "", password: "", role: "user" });
+      setUserMessage("User created.");
+      await loadUsers();
+    } catch {
+      setUserMessage("Nebula could not create that user. Use a unique username and an 8+ character password.");
+    }
+  }
+
+  async function approveAccountRequest(requestId: string, role: UserRole = "user") {
+    setUserMessage(null);
+
+    try {
+      await requestJson<{ user: AuthUser }>(`/api/users/requests/${requestId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role })
+      });
+      setUserMessage("Account request approved.");
+      await loadUsers();
+    } catch {
+      setUserMessage("Nebula could not approve that request.");
+    }
+  }
+
+  async function rejectAccountRequest(requestId: string) {
+    setUserMessage(null);
+
+    try {
+      const response = await fetch(`/api/users/requests/${requestId}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      setUserMessage("Account request rejected.");
+      await loadUsers();
+    } catch {
+      setUserMessage("Nebula could not reject that request.");
+    }
+  }
+
+  async function deleteAccount(user: AuthUser) {
+    setUserMessage(null);
+
+    try {
+      const response = await fetch(`/api/users/${user.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      setUserMessage(`${user.displayName} was deleted.`);
+      await loadUsers();
+    } catch {
+      setUserMessage("Nebula could not delete that user. Keep at least one admin account.");
+    }
+  }
+
+  useEffect(() => {
+    if (route.section === "settings" && authStatus?.user?.role === "admin") {
+      void loadUsers();
+    }
+  }, [route.section, authStatus?.user?.role]);
+
+  if (!authStatus) {
+    return <AuthShell title="Loading Nebula" subtitle="Checking your session..." />;
+  }
+
+  if (authStatus.setupRequired) {
+    return (
+      <AuthShell title="Create Admin Account" subtitle="Set up the first Nebula administrator.">
+        <AuthForm busy={authBusy} message={authMessage} mode="setup" onSubmit={(values) => submitAuth("setup", values)} />
+      </AuthShell>
+    );
+  }
+
+  if (!authStatus.user) {
+    const isRegistering = authView === "register";
+    return (
+      <AuthShell title={isRegistering ? "Request Account" : "Sign In"} subtitle={isRegistering ? "Create a Nebula account request for an admin to approve." : "Use your Nebula account to open the portal."}>
+        <AuthForm busy={authBusy} message={authMessage} mode={authView} onSubmit={(values) => submitAuth(authView, values)} />
+        <button
+          className="auth-switch"
+          onClick={() => {
+            setAuthMessage(null);
+            setAuthView(isRegistering ? "login" : "register");
+          }}
+          type="button"
+        >
+          {isRegistering ? "Back to sign in" : "Create account"}
+        </button>
+      </AuthShell>
+    );
+  }
+
   const installedIds = new Set(installed.map((addon) => addon.id));
   const installedById = new Map(installed.map((addon) => [addon.id, addon]));
+  const currentUser = authStatus.user;
+  const canManagePlatform = authStatus.user.role === "admin";
   const needsGitHubToken = Boolean(githubAuth.catalogLocked) || (catalogSource.type === "remote" && !githubAuth.configured);
   const activeAddon = route.section === "addon" ? installed.find((addon) => addon.id === route.addonId) : undefined;
   const activeManifest = route.section === "addon" ? catalog.find((addon) => addon.id === route.addonId) : undefined;
@@ -260,8 +472,8 @@ export default function App() {
         <div className="sidebar-status">
           <ShieldCheck size={18} />
           <div>
-            <strong>Single app mode</strong>
-            <span>Docker runs Nebula only</span>
+            <strong>{authStatus.user.displayName}</strong>
+            <span>{authStatus.user.role}</span>
           </div>
         </div>
       </aside>
@@ -276,6 +488,10 @@ export default function App() {
             <Search size={18} />
             <span>Search apps and settings</span>
           </div>
+          <button className="secondary-action" onClick={logout} type="button">
+            <LogOut size={18} />
+            Logout
+          </button>
         </header>
 
         {route.section === "dashboard" && (
@@ -334,18 +550,36 @@ export default function App() {
                 <span className="eyebrow">Catalog</span>
                 <h2>Add-ons</h2>
               </div>
-              <span className="soft-pill" title={catalogSource.location}>{catalogSource.label}</span>
+              <div className="catalog-actions">
+                <span className="soft-pill" title={catalogSource.location}>{catalogSource.label}</span>
+                {canManagePlatform && !needsGitHubToken && (
+                  <button className="secondary-action compact-action" disabled={catalogRefreshing} onClick={refreshCatalog} type="button">
+                    {catalogRefreshing ? <span className="loading-spinner" aria-hidden="true" /> : <RefreshCw size={16} />}
+                    Refresh
+                  </button>
+                )}
+                {canManagePlatform && !needsGitHubToken && (
+                  <button className="secondary-action compact-action" onClick={() => setShowGitHubSettings((current) => !current)} type="button">
+                    <Github size={16} />
+                    Private Catalog
+                  </button>
+                )}
+              </div>
             </div>
-            <GitHubConnectionPanel
-              auth={githubAuth}
-              busy={githubBusy}
-              catalogUrl={githubCatalogUrl}
-              message={githubMessage}
-              onConnect={connectGitHub}
-              onCatalogUrlChange={setGithubCatalogUrl}
-              onTokenChange={setGithubToken}
-              token={githubToken}
-            />
+            {canManagePlatform && (needsGitHubToken || showGitHubSettings) ? (
+              <GitHubConnectionPanel
+                auth={githubAuth}
+                busy={githubBusy}
+                catalogUrl={githubCatalogUrl}
+                message={githubMessage}
+                onConnect={connectGitHub}
+                onCatalogUrlChange={setGithubCatalogUrl}
+                onTokenChange={setGithubToken}
+                token={githubToken}
+              />
+            ) : !canManagePlatform ? (
+              <div className="store-notice">Users can browse installed apps. Ask an admin to install or update add-ons.</div>
+            ) : null}
             {storeMessage && (
               <div className={`store-notice ${storeMessage.kind}`} role="status">
                 {storeMessage.text}
@@ -358,18 +592,27 @@ export default function App() {
                 <p>The active catalog is remote. Add a GitHub token above so Nebula can read private catalog data.</p>
               </div>
             ) : (
-              <div className="addon-grid">
-                {catalog.map((addon) => (
-                  <AddonStoreCard
-                    addon={addon}
-                    busy={busyAddon === addon.id}
-                    installedAddon={installedById.get(addon.id)}
-                    key={addon.id}
-                    onInstall={() => installAddon(addon.id)}
-                    onUninstall={() => uninstallAddon(addon.id)}
-                  />
-                ))}
-              </div>
+              catalog.length > 0 ? (
+                <div className="addon-grid">
+                  {catalog.map((addon) => (
+                    <AddonStoreCard
+                      addon={addon}
+                      busy={busyAddon === addon.id}
+                      canManage={canManagePlatform}
+                      installedAddon={installedById.get(addon.id)}
+                      key={addon.id}
+                      onInstall={() => installAddon(addon.id)}
+                      onUninstall={() => uninstallAddon(addon.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state catalog-gate">
+                  <PackagePlus size={30} />
+                  <h3>No add-ons found</h3>
+                  <p>Nebula did not find any add-ons in this catalog.</p>
+                </div>
+              )
             )}
           </section>
         )}
@@ -393,15 +636,17 @@ export default function App() {
                       <span>{addon.route}</span>
                     </button>
                     <span className="status-dot">{addon.status}</span>
-                    <button
-                      className="icon-button"
-                      disabled={busyAddon === addon.id}
-                      onClick={() => uninstallAddon(addon.id)}
-                      title={`Uninstall ${addon.name}`}
-                      type="button"
-                    >
-                      <Trash2 size={18} />
-                    </button>
+                    {canManagePlatform && (
+                      <button
+                        className="icon-button"
+                        disabled={busyAddon === addon.id}
+                        onClick={() => uninstallAddon(addon.id)}
+                        title={`Uninstall ${addon.name}`}
+                        type="button"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -443,6 +688,84 @@ export default function App() {
                 ))}
               </div>
             </section>
+            {canManagePlatform && (
+              <section className="panel users-panel">
+                <div className="section-heading compact">
+                  <div>
+                    <span className="eyebrow">Access</span>
+                    <h2>Users</h2>
+                  </div>
+                </div>
+                {pendingRequests.length > 0 && (
+                  <div className="approval-list">
+                    {pendingRequests.map((request) => (
+                      <div className="approval-row" key={request.id}>
+                        <div>
+                          <strong>{request.displayName}</strong>
+                          <span>{request.username}</span>
+                        </div>
+                        <span className="soft-pill">Pending</span>
+                        <div className="approval-actions">
+                          <button className="primary-action compact-action" onClick={() => approveAccountRequest(request.id)} type="button">
+                            <UserCheck size={16} />
+                            Approve
+                          </button>
+                          <button className="secondary-action compact-action" onClick={() => rejectAccountRequest(request.id)} type="button">
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <form className="user-form" onSubmit={createAccount}>
+                  <input
+                    onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))}
+                    placeholder="username"
+                    value={newUser.username}
+                  />
+                  <input
+                    onChange={(event) => setNewUser((current) => ({ ...current, displayName: event.target.value }))}
+                    placeholder="display name"
+                    value={newUser.displayName}
+                  />
+                  <input
+                    onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))}
+                    placeholder="temporary password"
+                    type="password"
+                    value={newUser.password}
+                  />
+                  <select
+                    onChange={(event) => setNewUser((current) => ({ ...current, role: event.target.value as UserRole }))}
+                    value={newUser.role}
+                  >
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button className="primary-action" type="submit">
+                    <UserPlus size={18} />
+                    Create User
+                  </button>
+                </form>
+                {userMessage && <p className="github-message">{userMessage}</p>}
+                <div className="user-list">
+                  {users.map((user) => (
+                    <div className="user-row" key={user.id}>
+                      <strong>{user.displayName}</strong>
+                      <span>{user.username}</span>
+                      <span className="soft-pill">{user.role}</span>
+                      {user.id === currentUser.id ? (
+                        <span className="soft-pill">Current</span>
+                      ) : (
+                        <button className="icon-button" onClick={() => deleteAccount(user)} title={`Delete ${user.displayName}`} type="button">
+                          <Trash2 size={18} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
           </section>
         )}
 
@@ -469,6 +792,72 @@ function MetricCard({ icon: Icon, label, value }: { icon: typeof Gauge; label: s
   );
 }
 
+function AuthShell({ children, subtitle, title }: { children?: React.ReactNode; subtitle: string; title: string }) {
+  return (
+    <main className="auth-shell">
+      <section className="auth-card panel">
+        <div className="brand-mark">
+          <Cloud size={25} />
+        </div>
+        <span className="eyebrow">Nebula Portal</span>
+        <h1>{title}</h1>
+        <p>{subtitle}</p>
+        {children}
+      </section>
+    </main>
+  );
+}
+
+function AuthForm({
+  busy,
+  message,
+  mode,
+  onSubmit
+}: {
+  busy: boolean;
+  message: string | null;
+  mode: "login" | "register" | "setup";
+  onSubmit: (values: { username: string; displayName?: string; password: string }) => void;
+}) {
+  const [values, setValues] = useState({ username: "", displayName: "", password: "" });
+
+  return (
+    <form className="auth-form" onSubmit={(event) => {
+      event.preventDefault();
+      onSubmit(values);
+    }}>
+      <input
+        autoComplete="username"
+        onChange={(event) => setValues((current) => ({ ...current, username: event.target.value }))}
+        placeholder="username"
+        required
+        value={values.username}
+      />
+      {mode !== "login" && (
+        <input
+          onChange={(event) => setValues((current) => ({ ...current, displayName: event.target.value }))}
+          placeholder="display name"
+          value={values.displayName}
+        />
+      )}
+      <input
+        autoComplete={mode === "login" ? "current-password" : "new-password"}
+        minLength={mode === "login" ? 1 : 8}
+        onChange={(event) => setValues((current) => ({ ...current, password: event.target.value }))}
+        placeholder="password"
+        required
+        type="password"
+        value={values.password}
+      />
+      <button className="primary-action" disabled={busy} type="submit">
+        {busy && <span className="loading-spinner" aria-hidden="true" />}
+        {mode === "setup" ? "Create Admin" : mode === "register" ? "Request Account" : "Sign In"}
+      </button>
+      {message && <p className="auth-message">{message}</p>}
+    </form>
+  );
+}
+
 function AddonIcon({ color, icon }: { color: string; icon: string }) {
   const Icon = iconMap[icon as keyof typeof iconMap] ?? Sparkles;
   return (
@@ -481,12 +870,14 @@ function AddonIcon({ color, icon }: { color: string; icon: string }) {
 function AddonStoreCard({
   addon,
   busy,
+  canManage,
   installedAddon,
   onInstall,
   onUninstall
 }: {
   addon: AddonManifest;
   busy: boolean;
+  canManage: boolean;
   installedAddon?: InstalledAddon;
   onInstall: () => void;
   onUninstall: () => void;
@@ -511,15 +902,19 @@ function AddonStoreCard({
           <span className="permission-chip" key={permission}>{permission}</span>
         ))}
       </div>
-      <button
-        className={installed && !hasUpdate ? "secondary-action" : "primary-action"}
-        disabled={busy}
-        onClick={installed && !hasUpdate ? onUninstall : onInstall}
-        type="button"
-      >
-        {busy ? <span className="loading-spinner" aria-hidden="true" /> : installed && !hasUpdate ? <Trash2 size={18} /> : <PackagePlus size={18} />}
-        {primaryLabel}
-      </button>
+      {canManage ? (
+        <button
+          className={installed && !hasUpdate ? "secondary-action" : "primary-action"}
+          disabled={busy}
+          onClick={installed && !hasUpdate ? onUninstall : onInstall}
+          type="button"
+        >
+          {busy ? <span className="loading-spinner" aria-hidden="true" /> : installed && !hasUpdate ? <Trash2 size={18} /> : <PackagePlus size={18} />}
+          {primaryLabel}
+        </button>
+      ) : (
+        <span className="soft-pill">Admin managed</span>
+      )}
     </article>
   );
 }

@@ -18,6 +18,8 @@ npm run dev
 
 Open the portal at http://localhost:5173.
 
+On the first launch, Nebula asks you to create the first admin account. After setup, people can request an account from the login page, and admins approve or reject those requests from Settings. Admins can also create additional admin or user accounts directly. Admins manage GitHub catalog access and add-on installs; users can open installed add-ons and keep their own add-on data.
+
 ## Scripts
 
 - `npm run dev` starts the API and web UI locally.
@@ -34,6 +36,8 @@ ghcr.io/r6wolves-afk/nebula:latest
 
 Use `portainer-stack.yml` as the Portainer stack template after the image publish workflow finishes.
 
+For private add-on repositories, add a Portainer stack environment variable named `NEBULA_GITHUB_TOKEN` with a GitHub token that can read the private `Nebula-*` repos. The stack passes that token into Nebula without storing it in the compose file. The stack also sets `NEBULA_MAX_UPLOAD_BYTES=1073741824`, which allows 1 GB uploads for file-based add-ons.
+
 ## Server Shape
 
 The intended server layout is:
@@ -49,7 +53,7 @@ Ubuntu Server
       └─ Installed add-ons
 ```
 
-The Docker packaging here is intentionally one Nebula container with one persistent data volume.
+The Docker packaging here is intentionally one Nebula container with one persistent data directory. For server installs, bind mount `/opt/nebula/data` to `/data` so users, sessions, installed add-ons, GitHub settings, and add-on storage survive container updates.
 
 ## Add-on Catalog
 
@@ -61,7 +65,7 @@ You can change discovery with:
 NEBULA_GITHUB_OWNER=OWNER NEBULA_ADDON_REPO_PREFIX=Nebula- npm run dev
 ```
 
-Set `NEBULA_GITHUB_DISCOVERY=false` to use the local fallback catalog at `catalog/local-catalog.json`.
+The local fallback catalog at `catalog/local-catalog.json` is only for development or offline testing. Use `NEBULA_LOCAL_CATALOG=true` or `NEBULA_GITHUB_DISCOVERY=false` to opt into it explicitly.
 
 Catalog entries can include `packageUrl` to install a real add-on package. `packageUrl` should point to a zip that contains `manifest.json` and the manifest `entry` file. GitHub source archives work when the repo has the add-on files at the repo root:
 
@@ -74,10 +78,34 @@ Catalog entries can include `packageUrl` to install a real add-on package. `pack
 
 When an add-on with `packageUrl` is installed, Nebula extracts it into `.nebula-data/addons/<addon-id>` and serves the entry file inside the portal. If a discovered catalog version is newer than the installed version, the App Store shows an update action and reinstalls the package from GitHub.
 
-You can point Nebula at a different local catalog file with:
+Installed add-ons can store JSON through Nebula's add-on storage API:
+
+```text
+GET /api/addons/<addon-id>/storage/<key>
+PUT /api/addons/<addon-id>/storage/<key> { "value": ... }
+```
+
+Storage is written under the Nebula data volume per logged-in Nebula user, so it survives container restarts and follows that user across browsers and devices.
+
+Add-ons that need real files, such as Media or Files, can use Nebula's per-user add-on file API:
+
+```text
+GET /api/addons/<addon-id>/user-files?parentId=<folder-id>
+POST /api/addons/<addon-id>/user-folders { "name": "Photos", "parentId": null }
+POST /api/addons/<addon-id>/user-files multipart/form-data file=<file> parentId=<folder-id>
+PATCH /api/addons/<addon-id>/user-files/<entry-id> { "name": "New name", "parentId": null }
+GET /api/addons/<addon-id>/user-files/<file-id>
+DELETE /api/addons/<addon-id>/user-files/<entry-id>
+```
+
+The file API is a per-user folder tree. Omit `parentId` or pass `null` for the root folder. Listing a folder returns `entries`, `files`, `currentFolder`, `breadcrumbs`, and `allEntries`; entries are either `type: "folder"` with `id`, `name`, `parentId`, timestamps, or `type: "file"` with `id`, `name`, `filename`, `mimeType`, `size`, `parentId`, timestamps. `PATCH` renames an entry, moves it to another folder, or both. `DELETE` removes files and recursively removes folders.
+
+File uploads are stored under the Nebula data volume at `addon-files/users/<user-id>/<addon-id>`. Add-ons should declare `files.read` and `files.write` permissions when they use this API. The default upload limit is 1 GB and can be changed with `NEBULA_MAX_UPLOAD_BYTES`.
+
+If local catalog fallback is enabled, you can point Nebula at a different local catalog file with:
 
 ```bash
-NEBULA_CATALOG_PATH=/path/to/catalog.json npm run dev
+NEBULA_LOCAL_CATALOG=true NEBULA_CATALOG_PATH=/path/to/catalog.json npm run dev
 ```
 
 To browse a GitHub-hosted catalog instead, set:

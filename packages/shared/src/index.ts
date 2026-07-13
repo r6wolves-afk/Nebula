@@ -1,11 +1,34 @@
 export type AddonPermission =
   | "storage.read"
   | "storage.write"
+  | "files.read"
+  | "files.write"
   | "settings.read"
   | "settings.write"
   | "notifications.send";
 
 export type AddonType = "ui" | "trusted-backend";
+
+export type UserRole = "admin" | "user";
+
+export type AuthUser = {
+  id: string;
+  username: string;
+  displayName: string;
+  role: UserRole;
+};
+
+export type PendingUserRequest = {
+  id: string;
+  username: string;
+  displayName: string;
+  requestedAt: string;
+};
+
+export type AuthStatus = {
+  setupRequired: boolean;
+  user: AuthUser | null;
+};
 
 export type AddonManifest = {
   id: string;
@@ -46,6 +69,29 @@ export type InstalledAddon = {
   status: "enabled" | "disabled";
   installedAt: string;
 };
+
+export type AddonFileRecord = {
+  id: string;
+  type: "file";
+  name: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  parentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AddonFolderRecord = {
+  id: string;
+  type: "folder";
+  name: string;
+  parentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AddonFileEntry = AddonFileRecord | AddonFolderRecord;
 
 export type PlatformSummary = {
   installedCount: number;

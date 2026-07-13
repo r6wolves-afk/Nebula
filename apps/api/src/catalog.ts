@@ -8,6 +8,8 @@ import { getGitHubCatalogUrl, getGitHubToken, setRuntimeGitHubCatalogUrl } from 
 const addonPermissionSchema = z.enum([
   "storage.read",
   "storage.write",
+  "files.read",
+  "files.write",
   "settings.read",
   "settings.write",
   "notifications.send"
@@ -40,6 +42,7 @@ const envCatalogUrl = process.env.NEBULA_CATALOG_URL;
 const githubOwner = process.env.NEBULA_GITHUB_OWNER ?? "r6wolves-afk";
 const githubAddonRepoPrefix = process.env.NEBULA_ADDON_REPO_PREFIX ?? "Nebula-";
 const githubDiscoveryEnabled = process.env.NEBULA_GITHUB_DISCOVERY !== "false";
+const localCatalogEnabled = process.env.NEBULA_LOCAL_CATALOG === "true" || process.env.NEBULA_GITHUB_DISCOVERY === "false";
 
 let cachedCatalog: CatalogResponse | undefined;
 
@@ -87,11 +90,17 @@ export function getCatalogSource(): CatalogSource {
     };
   }
 
-  return {
-    type: "local",
-    label: "Local catalog",
-    location: catalogPath
-  };
+  return localCatalogEnabled
+    ? {
+      type: "local",
+      label: "Local catalog",
+      location: catalogPath
+    }
+    : {
+      type: "remote",
+      label: "GitHub discovery",
+      location: `https://github.com/${githubOwner}`
+    };
 }
 
 export function isCatalogWaitingForGitHubToken() {
@@ -117,13 +126,13 @@ async function readRemoteCatalog(url: string): Promise<string> {
   return response.text();
 }
 
-async function fetchGitHubJson<T>(url: string): Promise<T> {
+async function fetchGitHubJson<T>(url: string, useToken = true): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json"
   };
   const githubToken = getGitHubToken();
 
-  if (githubToken) {
+  if (githubToken && useToken) {
     headers.Authorization = `Bearer ${githubToken}`;
   }
 
@@ -137,12 +146,24 @@ async function fetchGitHubJson<T>(url: string): Promise<T> {
 
 async function listGitHubRepositories(): Promise<GitHubRepository[]> {
   const repositories: GitHubRepository[] = [];
+  const useAuthenticatedListing = Boolean(getGitHubToken());
 
   for (let page = 1; page <= 10; page += 1) {
-    const url = getGitHubToken()
+    const url = useAuthenticatedListing
       ? `https://api.github.com/user/repos?per_page=100&page=${page}&affiliation=owner,collaborator,organization_member`
       : `https://api.github.com/users/${githubOwner}/repos?per_page=100&page=${page}`;
-    const pageRepositories = await fetchGitHubJson<GitHubRepository[]>(url);
+    let pageRepositories: GitHubRepository[];
+
+    try {
+      pageRepositories = await fetchGitHubJson<GitHubRepository[]>(url, useAuthenticatedListing);
+    } catch (error) {
+      if (!useAuthenticatedListing || page !== 1) {
+        throw error;
+      }
+
+      return listPublicGitHubRepositories();
+    }
+
     repositories.push(...pageRepositories);
 
     if (pageRepositories.length < 100) {
@@ -153,11 +174,35 @@ async function listGitHubRepositories(): Promise<GitHubRepository[]> {
   return repositories.filter((repository) => repository.full_name.toLowerCase().startsWith(`${githubOwner.toLowerCase()}/`));
 }
 
+async function listPublicGitHubRepositories(): Promise<GitHubRepository[]> {
+  const repositories: GitHubRepository[] = [];
+
+  for (let page = 1; page <= 10; page += 1) {
+    const pageRepositories = await fetchGitHubJson<GitHubRepository[]>(
+      `https://api.github.com/users/${githubOwner}/repos?per_page=100&page=${page}`,
+      false
+    );
+    repositories.push(...pageRepositories);
+
+    if (pageRepositories.length < 100) {
+      break;
+    }
+  }
+
+  return repositories;
+}
+
 async function readGitHubManifest(repository: GitHubRepository): Promise<AddonManifest | undefined> {
   try {
-    const content = await fetchGitHubJson<GitHubContent>(
-      `https://api.github.com/repos/${repository.full_name}/contents/manifest.json?ref=${encodeURIComponent(repository.default_branch)}`
-    );
+    const manifestUrl = `https://api.github.com/repos/${repository.full_name}/contents/manifest.json?ref=${encodeURIComponent(repository.default_branch)}`;
+    let content: GitHubContent;
+
+    try {
+      content = await fetchGitHubJson<GitHubContent>(manifestUrl);
+    } catch {
+      content = await fetchGitHubJson<GitHubContent>(manifestUrl, false);
+    }
+
     const rawManifest = content.content && content.encoding === "base64"
       ? Buffer.from(content.content.replace(/\s/g, ""), "base64").toString("utf8")
       : content.download_url
@@ -223,6 +268,11 @@ export async function getCatalogResponse(): Promise<CatalogResponse> {
   }
 
   if (shouldDiscoverGitHubRepos()) {
+    cachedCatalog = await discoverGitHubCatalog();
+    return cachedCatalog;
+  }
+
+  if (!localCatalogEnabled) {
     cachedCatalog = await discoverGitHubCatalog();
     return cachedCatalog;
   }

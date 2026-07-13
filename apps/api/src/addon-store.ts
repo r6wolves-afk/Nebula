@@ -33,7 +33,7 @@ async function writeInstalled(addons: InstalledAddon[]) {
 export async function listInstalledAddons(): Promise<InstalledAddon[]> {
   try {
     const raw = await readFile(installedPath, "utf8");
-    return JSON.parse(raw) as InstalledAddon[];
+    return JSON.parse(raw.replace(/^\uFEFF/, "")) as InstalledAddon[];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return [];
@@ -53,7 +53,11 @@ async function downloadAddonPackage(packageUrl: string) {
     headers.Authorization = `Bearer ${githubToken}`;
   }
 
-  const response = await fetch(packageUrl, { headers });
+  let response = await fetch(packageUrl, { headers });
+  if (!response.ok && githubToken) {
+    response = await fetch(packageUrl, { headers: { Accept: headers.Accept } });
+  }
+
   if (!response.ok) {
     throw new Error(`Failed to download add-on package: ${response.status} ${packageUrl}`);
   }

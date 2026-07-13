@@ -12,12 +12,11 @@ services:
       NEBULA_GITHUB_OWNER: r6wolves-afk
       NEBULA_ADDON_REPO_PREFIX: Nebula-
       NEBULA_GITHUB_DISCOVERY: "true"
+      NEBULA_GITHUB_TOKEN: "${NEBULA_GITHUB_TOKEN:-}"
+      NEBULA_MAX_UPLOAD_BYTES: 1073741824
     volumes:
-      - nebula-data:/data
+      - /opt/nebula/data:/data
     deploy:
       replicas: 1
       restart_policy:
         condition: any
-
-volumes:
-  nebula-data:

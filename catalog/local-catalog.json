@@ -3,7 +3,7 @@
     {
       "id": "notes",
       "name": "Nebula Notes",
-      "version": "0.1.0",
+      "version": "0.1.3",
       "type": "ui",
       "summary": "Private notes inside Nebula.",
       "description": "A frontend-only notes add-on for the Nebula portal.",

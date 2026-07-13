@@ -1,10 +1,12 @@
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import type { AuthUser } from "@nebula/shared";
 import {
   clearCatalogCache,
   findCatalogAddon,
@@ -14,7 +16,23 @@ import {
   isCatalogWaitingForGitHubToken,
   setRuntimeCatalogUrl
 } from "./catalog.js";
+import { readAddonStorage, writeAddonStorage } from "./addon-storage.js";
+import { createAddonFolder, deleteAddonFileEntry, getAddonFile, listAddonFileEntries, saveAddonFile, updateAddonFileEntry } from "./addon-files.js";
 import { getInstalledAddonFilePath, installAddon, listInstalledAddons, uninstallAddon } from "./addon-store.js";
+import {
+  approvePendingUserRequest,
+  createSession,
+  createPendingUserRequest,
+  createUser,
+  deleteSession,
+  deleteUser,
+  getSessionUser,
+  hasUsers,
+  listPendingUserRequests,
+  listUsers,
+  rejectPendingUserRequest,
+  verifyUserCredentials
+} from "./auth-store.js";
 import {
   clearRuntimeGitHubConnection,
   getGitHubAuthStatus,
@@ -26,20 +44,264 @@ const server = Fastify({ logger: true });
 const host = process.env.NEBULA_HOST ?? "127.0.0.1";
 const port = Number(process.env.NEBULA_PORT ?? 8787);
 const webDist = process.env.NEBULA_WEB_DIST ?? path.resolve(process.cwd(), "apps/web/dist");
+const sessionCookie = "nebula_session";
 
 await server.register(cors, { origin: true });
+await server.register(multipart, {
+  limits: {
+    fileSize: Number(process.env.NEBULA_MAX_UPLOAD_BYTES ?? 1024 * 1024 * 1024)
+  }
+});
+
+function parseCookies(cookieHeader: string | undefined) {
+  return Object.fromEntries(
+    (cookieHeader ?? "")
+      .split(";")
+      .map((cookie) => cookie.trim())
+      .filter(Boolean)
+      .map((cookie) => {
+        const [name, ...valueParts] = cookie.split("=");
+        return [decodeURIComponent(name), decodeURIComponent(valueParts.join("="))];
+      })
+  );
+}
+
+function sessionCookieHeader(token: string, expiresAt: string) {
+  const secure = process.env.NEBULA_COOKIE_SECURE === "true" ? "; Secure" : "";
+  return `${sessionCookie}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Expires=${new Date(expiresAt).toUTCString()}${secure}`;
+}
+
+function clearSessionCookieHeader() {
+  return `${sessionCookie}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+}
+
+async function getRequestUser(request: { headers: { cookie?: string } }) {
+  const cookies = parseCookies(request.headers.cookie);
+  return getSessionUser(cookies[sessionCookie]);
+}
+
+async function requireUser(request: { headers: { cookie?: string } }, reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }) {
+  const user = await getRequestUser(request);
+  if (!user) {
+    reply.code(401).send({ error: "Authentication required" });
+    return undefined;
+  }
+
+  return user;
+}
+
+async function requireAdmin(request: { headers: { cookie?: string } }, reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }) {
+  const user = await requireUser(request, reply);
+  if (!user) {
+    return undefined;
+  }
+
+  if (user.role !== "admin") {
+    reply.code(403).send({ error: "Admin role required" });
+    return undefined;
+  }
+
+  return user;
+}
+
+async function createLoginReply(reply: { header: (name: string, value: string) => unknown }, user: AuthUser) {
+  const session = await createSession(user.id);
+  reply.header("Set-Cookie", sessionCookieHeader(session.token, session.expiresAt));
+  return { user };
+}
+
+async function requireInstalledAddon(addonId: string, reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }) {
+  const installed = await listInstalledAddons();
+  if (!installed.some((addon) => addon.id === addonId)) {
+    reply.code(404).send({ error: "Add-on is not installed" });
+    return false;
+  }
+
+  return true;
+}
+
+function headerFilename(filename: string) {
+  return filename.replace(/["\\\r\n]/g, "_");
+}
+
+function multipartFieldValue(field: unknown) {
+  const candidate = Array.isArray(field) ? field[0] : field;
+  const value = (candidate as { value?: unknown } | undefined)?.value;
+  return typeof value === "string" ? value : undefined;
+}
+
+function entryMutationReply(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, result: { status: string; entry?: unknown }) {
+  if (result.status === "ok") {
+    return { entry: result.entry };
+  }
+
+  if (result.status === "not-found") {
+    return reply.code(404).send({ error: "File entry was not found" });
+  }
+
+  if (result.status === "invalid-parent") {
+    return reply.code(400).send({ error: "Parent folder was not found" });
+  }
+
+  if (result.status === "cycle") {
+    return reply.code(400).send({ error: "A folder cannot be moved into itself or one of its folders" });
+  }
+
+  if (result.status === "duplicate-name") {
+    return reply.code(409).send({ error: "A file or folder with that name already exists here" });
+  }
+
+  return reply.code(400).send({ error: "File operation failed" });
+}
 
 server.get("/api/health", async () => ({ status: "ok", name: "nebula" }));
 
-server.get("/api/catalog", async () => getCatalogResponse());
+server.get("/api/auth/status", async (request) => ({
+  setupRequired: !(await hasUsers()),
+  user: await getRequestUser(request) ?? null
+}));
 
-server.get("/api/github/status", async () => ({
+server.post("/api/auth/setup", async (request, reply) => {
+  if (await hasUsers()) {
+    return reply.code(409).send({ error: "Nebula has already been set up" });
+  }
+
+  const body = z.object({
+    username: z.string().trim().regex(/^[a-zA-Z0-9_-]{3,32}$/),
+    displayName: z.string().trim().min(1).max(80).optional(),
+    password: z.string().min(8)
+  }).parse(request.body);
+  const user = await createUser({ ...body, role: "admin" });
+  return createLoginReply(reply, user);
+});
+
+server.post("/api/auth/login", async (request, reply) => {
+  const body = z.object({
+    username: z.string().trim().min(1),
+    password: z.string().min(1)
+  }).parse(request.body);
+  const user = await verifyUserCredentials(body.username, body.password);
+
+  if (!user) {
+    return reply.code(401).send({ error: "Invalid username or password" });
+  }
+
+  return createLoginReply(reply, user);
+});
+
+server.post("/api/auth/register", async (request, reply) => {
+  if (!(await hasUsers())) {
+    return reply.code(409).send({ error: "Create the first admin account before requesting access" });
+  }
+
+  const body = z.object({
+    username: z.string().trim().regex(/^[a-zA-Z0-9_-]{3,32}$/),
+    displayName: z.string().trim().min(1).max(80).optional(),
+    password: z.string().min(8)
+  }).parse(request.body);
+  const pendingRequest = await createPendingUserRequest(body);
+  return reply.code(202).send({ request: pendingRequest });
+});
+
+server.post("/api/auth/logout", async (request, reply) => {
+  const cookies = parseCookies(request.headers.cookie);
+  if (cookies[sessionCookie]) {
+    await deleteSession(cookies[sessionCookie]);
+  }
+
+  reply.header("Set-Cookie", clearSessionCookieHeader());
+  return reply.code(204).send();
+});
+
+server.get("/api/users", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
+  return { users: await listUsers(), pendingRequests: await listPendingUserRequests() };
+});
+
+server.post("/api/users", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
+  const body = z.object({
+    username: z.string().trim().regex(/^[a-zA-Z0-9_-]{3,32}$/),
+    displayName: z.string().trim().min(1).max(80).optional(),
+    password: z.string().min(8),
+    role: z.enum(["admin", "user"])
+  }).parse(request.body);
+  const user = await createUser(body);
+  return reply.code(201).send({ user });
+});
+
+server.delete("/api/users/:id", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
+  const params = z.object({ id: z.string().min(1) }).parse(request.params);
+  const result = await deleteUser(params.id);
+
+  if (result === "not-found") {
+    return reply.code(404).send({ error: "User was not found" });
+  }
+
+  if (result === "last-admin") {
+    return reply.code(409).send({ error: "Nebula must keep at least one admin account" });
+  }
+
+  return reply.code(204).send();
+});
+
+server.post("/api/users/requests/:id/approve", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
+  const params = z.object({ id: z.string().min(1) }).parse(request.params);
+  const body = z.object({ role: z.enum(["admin", "user"]).default("user") }).parse(request.body ?? {});
+  const user = await approvePendingUserRequest(params.id, body.role);
+
+  if (!user) {
+    return reply.code(404).send({ error: "Signup request was not found" });
+  }
+
+  return { user };
+});
+
+server.delete("/api/users/requests/:id", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
+  const params = z.object({ id: z.string().min(1) }).parse(request.params);
+  const rejected = await rejectPendingUserRequest(params.id);
+
+  if (!rejected) {
+    return reply.code(404).send({ error: "Signup request was not found" });
+  }
+
+  return reply.code(204).send();
+});
+
+server.get("/api/catalog", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  return getCatalogResponse();
+});
+
+server.post("/api/catalog/refresh", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
+  clearCatalogCache();
+  return getCatalogResponse();
+});
+
+server.get("/api/github/status", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  return {
   ...getGitHubAuthStatus(),
   catalogSource: getCatalogSource(),
   catalogLocked: isCatalogWaitingForGitHubToken()
-}));
+  };
+});
 
 server.post("/api/github/token", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
   const parsedBody = z.object({
     token: z.string().trim().min(1),
     catalogUrl: z.string().trim().url().optional()
@@ -69,9 +331,162 @@ server.post("/api/github/token", async (request, reply) => {
   return reply.code(204).send();
 });
 
-server.get("/api/addons/installed", async () => ({ addons: await listInstalledAddons() }));
+server.get("/api/addons/installed", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  return { addons: await listInstalledAddons() };
+});
+
+server.get("/api/addons/:id/storage/:key", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    key: z.string().regex(/^[a-z0-9-]+$/)
+  }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  return { value: await readAddonStorage(user.id, params.id, params.key) };
+});
+
+server.put("/api/addons/:id/storage/:key", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    key: z.string().regex(/^[a-z0-9-]+$/)
+  }).parse(request.params);
+  const body = z.object({ value: z.unknown() }).parse(request.body);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  await writeAddonStorage(user.id, params.id, params.key, body.value);
+  return reply.code(204).send();
+});
+
+server.get("/api/addons/:id/user-files", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().regex(/^[a-z0-9-]+$/) }).parse(request.params);
+  const query = z.object({ parentId: z.string().uuid().nullable().optional() }).parse(request.query);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+  const parentId = query.parentId === undefined ? null : query.parentId;
+  const listing = await listAddonFileEntries(user.id, params.id, parentId);
+
+  if (!listing) {
+    return reply.code(404).send({ error: "Parent folder was not found" });
+  }
+
+  return {
+    ...listing,
+    files: listing.entries.filter((entry) => entry.type === "file")
+  };
+});
+
+server.post("/api/addons/:id/user-folders", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().regex(/^[a-z0-9-]+$/) }).parse(request.params);
+  const body = z.object({
+    name: z.string().trim().min(1).max(160),
+    parentId: z.string().uuid().nullable().optional()
+  }).parse(request.body);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const result = await createAddonFolder(user.id, params.id, body.name, body.parentId ?? null);
+  if (result.status === "ok") {
+    return reply.code(201).send({ folder: result.entry, entry: result.entry });
+  }
+
+  return entryMutationReply(reply, result);
+});
+
+server.post("/api/addons/:id/user-files", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().regex(/^[a-z0-9-]+$/) }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const upload = await request.file();
+  if (!upload) {
+    return reply.code(400).send({ error: "A multipart file field is required" });
+  }
+
+  const parentIdValue = multipartFieldValue(upload.fields.parentId);
+  const parentId = typeof parentIdValue === "string" && parentIdValue.trim() ? parentIdValue.trim() : null;
+
+  const result = await saveAddonFile({
+    addonId: params.id,
+    filename: upload.filename,
+    mimeType: upload.mimetype,
+    parentId,
+    stream: upload.file,
+    userId: user.id
+  });
+
+  if (result.status === "ok") {
+    return reply.code(201).send({ file: result.entry, entry: result.entry });
+  }
+
+  return entryMutationReply(reply, result);
+});
+
+server.patch("/api/addons/:id/user-files/:entryId", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    entryId: z.string().uuid()
+  }).parse(request.params);
+  const body = z.object({
+    name: z.string().trim().min(1).max(160).optional(),
+    parentId: z.string().uuid().nullable().optional()
+  }).parse(request.body);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const result = await updateAddonFileEntry(user.id, params.id, params.entryId, body);
+  return entryMutationReply(reply, result);
+});
+
+server.get("/api/addons/:id/user-files/:entryId", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    entryId: z.string().uuid()
+  }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const storedFile = await getAddonFile(user.id, params.id, params.entryId);
+  if (!storedFile) {
+    return reply.code(404).send({ error: "File was not found" });
+  }
+
+  reply.type(storedFile.file.mimeType);
+  reply.header("Content-Length", storedFile.file.size);
+  reply.header("Content-Disposition", `inline; filename="${headerFilename(storedFile.file.filename)}"`);
+  return reply.send(createReadStream(storedFile.filePath));
+});
+
+server.delete("/api/addons/:id/user-files/:entryId", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    entryId: z.string().uuid()
+  }).parse(request.params);
+  if (!(await requireInstalledAddon(params.id, reply))) return;
+
+  const deleted = await deleteAddonFileEntry(user.id, params.id, params.entryId);
+  if (!deleted) {
+    return reply.code(404).send({ error: "File entry was not found" });
+  }
+
+  return reply.code(204).send();
+});
 
 server.get("/api/addons/:id/files/*", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
   const params = z.object({ id: z.string().min(1), "*": z.string().min(1) }).parse(request.params);
   const filePath = getInstalledAddonFilePath(params.id, params["*"]);
   let fileStat;
@@ -102,7 +517,9 @@ server.get("/api/addons/:id/files/*", async (request, reply) => {
   return reply.send(createReadStream(filePath));
 });
 
-server.get("/api/summary", async () => {
+server.get("/api/summary", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
   const catalog = await getCatalog();
   const installed = await listInstalledAddons();
   return {
@@ -113,6 +530,8 @@ server.get("/api/summary", async () => {
 });
 
 server.post("/api/addons/:id/install", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
   const params = z.object({ id: z.string().min(1) }).parse(request.params);
   const manifest = await findCatalogAddon(params.id);
 
@@ -125,6 +544,8 @@ server.post("/api/addons/:id/install", async (request, reply) => {
 });
 
 server.delete("/api/addons/:id", async (request, reply) => {
+  const admin = await requireAdmin(request, reply);
+  if (!admin) return;
   const params = z.object({ id: z.string().min(1) }).parse(request.params);
   await uninstallAddon(params.id);
   return reply.code(204).send();
