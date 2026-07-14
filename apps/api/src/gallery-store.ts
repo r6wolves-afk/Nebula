@@ -9,9 +9,10 @@ const dataDir = process.env.NEBULA_DATA_DIR ?? path.resolve(process.cwd(), ".neb
 const galleryDir = path.join(dataDir, "gallery");
 const mediaDir = path.join(galleryDir, "media");
 const galleryIndexPath = path.join(galleryDir, "gallery.json");
+let galleryMutationQueue = Promise.resolve();
 
 async function quarantineCorruptGalleryIndex(error: unknown) {
-  const quarantinePath = path.join(galleryDir, `gallery.corrupt-${Date.now()}.json`);
+  const quarantinePath = path.join(galleryDir, `gallery.corrupt-${randomUUID()}.json`);
 
   try {
     await rename(galleryIndexPath, quarantinePath);
@@ -86,9 +87,15 @@ async function readGalleryIndex(): Promise<StoredGalleryMedia[]> {
 
 async function writeGalleryIndex(media: StoredGalleryMedia[]) {
   await mkdir(galleryDir, { recursive: true });
-  const tempPath = path.join(galleryDir, `gallery.${process.pid}.${Date.now()}.tmp`);
+  const tempPath = path.join(galleryDir, `gallery.${process.pid}.${randomUUID()}.tmp`);
   await writeFile(tempPath, JSON.stringify(media, null, 2), "utf8");
   await rename(tempPath, galleryIndexPath);
+}
+
+async function withGalleryIndexMutation<T>(operation: () => Promise<T>) {
+  const result = galleryMutationQueue.then(operation, operation);
+  galleryMutationQueue = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 function canViewGalleryMedia(user: AuthUser, media: StoredGalleryMedia) {
@@ -329,7 +336,6 @@ export async function saveGalleryUpload({
   const fileStat = await stat(filePath);
   const now = new Date().toISOString();
   const metadata = await mediaMetadata(filePath, resolvedMimeType);
-  const records = await readGalleryIndex();
   const record: StoredGalleryMedia = {
     id,
     ownerUserId: owner.id,
@@ -345,8 +351,11 @@ export async function saveGalleryUpload({
     updatedAt: now
   };
 
-  await writeGalleryIndex([record, ...records]);
-  return { status: "ok" as const, media: publicMedia(record) };
+  return withGalleryIndexMutation(async () => {
+    const records = await readGalleryIndex();
+    await writeGalleryIndex([record, ...records]);
+    return { status: "ok" as const, media: publicMedia(record) };
+  });
 }
 
 export async function getVisibleGalleryMedia(user: AuthUser, mediaId: string) {
@@ -364,116 +373,124 @@ export async function getVisibleGalleryMedia(user: AuthUser, mediaId: string) {
 }
 
 export async function setGalleryMediaVisibility(user: AuthUser, mediaId: string, visibility: GalleryVisibility) {
-  const records = await readGalleryIndex();
-  const media = records.find((record) => record.id === mediaId);
+  return withGalleryIndexMutation(async () => {
+    const records = await readGalleryIndex();
+    const media = records.find((record) => record.id === mediaId);
 
-  if (!media) {
-    return { status: "not-found" as const };
-  }
+    if (!media) {
+      return { status: "not-found" as const };
+    }
 
-  if (!canManageGalleryMedia(user, media)) {
-    return { status: "forbidden" as const };
-  }
+    if (!canManageGalleryMedia(user, media)) {
+      return { status: "forbidden" as const };
+    }
 
-  const updatedMedia: StoredGalleryMedia = {
-    ...media,
-    visibility,
-    updatedAt: new Date().toISOString()
-  };
-  await writeGalleryIndex(records.map((record) => record.id === mediaId ? updatedMedia : record));
-  return { status: "ok" as const, media: publicMedia(updatedMedia) };
+    const updatedMedia: StoredGalleryMedia = {
+      ...media,
+      visibility,
+      updatedAt: new Date().toISOString()
+    };
+    await writeGalleryIndex(records.map((record) => record.id === mediaId ? updatedMedia : record));
+    return { status: "ok" as const, media: publicMedia(updatedMedia) };
+  });
 }
 
 export async function setGalleryMediaVisibilityBulk(user: AuthUser, mediaIds: string[], visibility: GalleryVisibility) {
-  const requestedIds = [...new Set(mediaIds)];
-  const requestedIdSet = new Set(requestedIds);
-  const records = await readGalleryIndex();
-  const foundIds = new Set<string>();
-  const forbiddenIds: string[] = [];
-  const updatedMedia: GalleryMedia[] = [];
-  const now = new Date().toISOString();
+  return withGalleryIndexMutation(async () => {
+    const requestedIds = [...new Set(mediaIds)];
+    const requestedIdSet = new Set(requestedIds);
+    const records = await readGalleryIndex();
+    const foundIds = new Set<string>();
+    const forbiddenIds: string[] = [];
+    const updatedMedia: GalleryMedia[] = [];
+    const now = new Date().toISOString();
 
-  const nextRecords = records.map((record) => {
-    if (!requestedIdSet.has(record.id)) {
-      return record;
+    const nextRecords = records.map((record) => {
+      if (!requestedIdSet.has(record.id)) {
+        return record;
+      }
+
+      foundIds.add(record.id);
+      if (!canManageGalleryMedia(user, record)) {
+        forbiddenIds.push(record.id);
+        return record;
+      }
+
+      const updatedRecord: StoredGalleryMedia = {
+        ...record,
+        visibility,
+        updatedAt: now
+      };
+      updatedMedia.push(publicMedia(updatedRecord));
+      return updatedRecord;
+    });
+
+    if (updatedMedia.length > 0) {
+      await writeGalleryIndex(nextRecords);
     }
 
-    foundIds.add(record.id);
-    if (!canManageGalleryMedia(user, record)) {
-      forbiddenIds.push(record.id);
-      return record;
-    }
-
-    const updatedRecord: StoredGalleryMedia = {
-      ...record,
-      visibility,
-      updatedAt: now
+    return {
+      media: updatedMedia,
+      forbiddenIds,
+      notFoundIds: requestedIds.filter((id) => !foundIds.has(id))
     };
-    updatedMedia.push(publicMedia(updatedRecord));
-    return updatedRecord;
   });
-
-  if (updatedMedia.length > 0) {
-    await writeGalleryIndex(nextRecords);
-  }
-
-  return {
-    media: updatedMedia,
-    forbiddenIds,
-    notFoundIds: requestedIds.filter((id) => !foundIds.has(id))
-  };
 }
 
 export async function deleteGalleryMedia(user: AuthUser, mediaId: string) {
-  const records = await readGalleryIndex();
-  const media = records.find((record) => record.id === mediaId);
+  return withGalleryIndexMutation(async () => {
+    const records = await readGalleryIndex();
+    const media = records.find((record) => record.id === mediaId);
 
-  if (!media) {
-    return "not-found" as const;
-  }
+    if (!media) {
+      return "not-found" as const;
+    }
 
-  if (!canManageGalleryMedia(user, media)) {
-    return "forbidden" as const;
-  }
+    if (!canManageGalleryMedia(user, media)) {
+      return "forbidden" as const;
+    }
 
-  await writeGalleryIndex(records.filter((record) => record.id !== mediaId));
-  await rm(path.join(mediaDir, media.ownerUserId, media.storedName), { force: true });
-  return "deleted" as const;
+    await writeGalleryIndex(records.filter((record) => record.id !== mediaId));
+    await rm(path.join(mediaDir, media.ownerUserId, media.storedName), { force: true });
+    return "deleted" as const;
+  });
 }
 
 export async function deleteGalleryMediaBulk(user: AuthUser, mediaIds: string[]) {
-  const requestedIds = [...new Set(mediaIds)];
-  const requestedIdSet = new Set(requestedIds);
-  const records = await readGalleryIndex();
-  const foundIds = new Set<string>();
-  const forbiddenIds: string[] = [];
-  const deletedIds: string[] = [];
-  const deletedFilePaths: string[] = [];
+  return withGalleryIndexMutation(async () => {
+    const requestedIds = [...new Set(mediaIds)];
+    const requestedIdSet = new Set(requestedIds);
+    const records = await readGalleryIndex();
+    const foundIds = new Set<string>();
+    const forbiddenIds: string[] = [];
+    const deletedIds: string[] = [];
+    const deletedFilePaths: string[] = [];
 
-  const nextRecords = records.filter((record) => {
-    if (!requestedIdSet.has(record.id)) {
-      return true;
+    const nextRecords = records.filter((record) => {
+      if (!requestedIdSet.has(record.id)) {
+        return true;
+      }
+
+      foundIds.add(record.id);
+      if (!canManageGalleryMedia(user, record)) {
+        forbiddenIds.push(record.id);
+        return true;
+      }
+
+      deletedIds.push(record.id);
+      deletedFilePaths.push(path.join(mediaDir, record.ownerUserId, record.storedName));
+      return false;
+    });
+
+    if (deletedIds.length > 0) {
+      await writeGalleryIndex(nextRecords);
+      await Promise.all(deletedFilePaths.map((filePath) => rm(filePath, { force: true })));
     }
 
-    foundIds.add(record.id);
-    if (!canManageGalleryMedia(user, record)) {
-      forbiddenIds.push(record.id);
-      return true;
-    }
-
-    deletedIds.push(record.id);
-    deletedFilePaths.push(path.join(mediaDir, record.ownerUserId, record.storedName));
-    return false;
+    return {
+      deletedIds,
+      forbiddenIds,
+      notFoundIds: requestedIds.filter((id) => !foundIds.has(id))
+    };
   });
-
-  if (deletedIds.length > 0) {
-    await writeGalleryIndex(nextRecords);
-    await Promise.all(deletedFilePaths.map((filePath) => rm(filePath, { force: true })));
-  }
-
-  return {
-    deletedIds,
-    forbiddenIds,
-    notFoundIds: requestedIds.filter((id) => !foundIds.has(id))
-  };
 }
