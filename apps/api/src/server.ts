@@ -59,11 +59,13 @@ import {
   setRuntimeGitHubToken
 } from "./github-auth.js";
 import {
+  deleteGalleryMediaBulk,
   deleteGalleryMedia,
   getGalleryTimeline,
   getVisibleGalleryMedia,
   listGalleryMedia,
   saveGalleryUpload,
+  setGalleryMediaVisibilityBulk,
   setGalleryMediaVisibility
 } from "./gallery-store.js";
 import { listNotifications, markAllNotificationsRead, markNotificationRead } from "./notification-store.js";
@@ -474,6 +476,27 @@ server.post("/api/gallery/upload", async (request, reply) => {
   }
 
   return reply.code(201).send({ media: result.media });
+});
+
+server.post("/api/gallery/media/share", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const body = z.object({ ids: z.array(z.string().uuid()).min(1).max(10) }).parse(request.body);
+  return setGalleryMediaVisibilityBulk(user, body.ids, "shared");
+});
+
+server.post("/api/gallery/media/private", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const body = z.object({ ids: z.array(z.string().uuid()).min(1).max(10) }).parse(request.body);
+  return setGalleryMediaVisibilityBulk(user, body.ids, "private");
+});
+
+server.delete("/api/gallery/media", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const body = z.object({ ids: z.array(z.string().uuid()).min(1).max(10) }).parse(request.body);
+  return deleteGalleryMediaBulk(user, body.ids);
 });
 
 server.get("/api/gallery/media/:id", async (request, reply) => {
