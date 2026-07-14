@@ -3,11 +3,13 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
+import sharp from "sharp";
 import type { AuthUser, GalleryMedia, GalleryMediaKind, GalleryTimelineYear, GalleryVisibility } from "@nebula/shared";
 
 const dataDir = process.env.NEBULA_DATA_DIR ?? path.resolve(process.cwd(), ".nebula-data");
 const galleryDir = path.join(dataDir, "gallery");
 const mediaDir = path.join(galleryDir, "media");
+const thumbnailDir = path.join(galleryDir, "thumbnails");
 const galleryIndexPath = path.join(galleryDir, "gallery.json");
 let galleryMutationQueue = Promise.resolve();
 
@@ -29,6 +31,10 @@ const supportedVideoTypes = new Set(["video/mp4", "video/webm", "video/quicktime
 
 type StoredGalleryMedia = Omit<GalleryMedia, "contentUrl" | "thumbnailUrl"> & {
   storedName: string;
+  thumbnailName?: string;
+  thumbnailMimeType?: string;
+  thumbnailSize?: number;
+  thumbnailUpdatedAt?: string;
 };
 
 type GalleryListOptions = {
@@ -55,11 +61,24 @@ function mediaKindForMime(mimeType: string): GalleryMediaKind | undefined {
 }
 
 function publicMedia(record: StoredGalleryMedia): GalleryMedia {
-  const { storedName: _storedName, ...media } = record;
-  return {
+  const {
+    storedName: _storedName,
+    thumbnailName: _thumbnailName,
+    thumbnailMimeType: _thumbnailMimeType,
+    thumbnailSize: _thumbnailSize,
+    thumbnailUpdatedAt: _thumbnailUpdatedAt,
+    ...media
+  } = record;
+  const publicRecord: GalleryMedia = {
     ...media,
     contentUrl: `/api/gallery/media/${record.id}/content`
   };
+
+  if (record.thumbnailName && record.thumbnailMimeType && record.thumbnailSize && record.thumbnailUpdatedAt) {
+    publicRecord.thumbnailUrl = `/api/gallery/media/${record.id}/content?variant=thumbnail&v=${encodeURIComponent(record.thumbnailUpdatedAt)}`;
+  }
+
+  return publicRecord;
 }
 
 async function readGalleryIndex(): Promise<StoredGalleryMedia[]> {
@@ -268,6 +287,32 @@ async function mediaMetadata(filePath: string, mimeType: string) {
   };
 }
 
+async function createImageThumbnail(filePath: string, ownerUserId: string, mediaId: string) {
+  const thumbnailName = `${mediaId}.jpg`;
+  const thumbnailPath = path.join(thumbnailDir, ownerUserId, thumbnailName);
+
+  try {
+    await mkdir(path.dirname(thumbnailPath), { recursive: true });
+    await sharp(filePath, { animated: false })
+      .rotate()
+      .resize({ width: 512, height: 512, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 82, mozjpeg: true })
+      .toFile(thumbnailPath);
+
+    const thumbnailStat = await stat(thumbnailPath);
+    return {
+      thumbnailName,
+      thumbnailMimeType: "image/jpeg",
+      thumbnailSize: thumbnailStat.size,
+      thumbnailUpdatedAt: thumbnailStat.mtime.toISOString()
+    };
+  } catch (error) {
+    console.warn(`Gallery thumbnail could not be generated for ${mediaId}`, error);
+    await rm(thumbnailPath, { force: true });
+    return {};
+  }
+}
+
 function applyGalleryFilters(user: AuthUser, records: StoredGalleryMedia[], options: GalleryListOptions = {}) {
   const scope = options.scope ?? "all";
   return records
@@ -336,6 +381,7 @@ export async function saveGalleryUpload({
   const fileStat = await stat(filePath);
   const now = new Date().toISOString();
   const metadata = await mediaMetadata(filePath, resolvedMimeType);
+  const thumbnailMetadata = kind === "image" ? await createImageThumbnail(filePath, owner.id, id) : {};
   const record: StoredGalleryMedia = {
     id,
     ownerUserId: owner.id,
@@ -346,6 +392,7 @@ export async function saveGalleryUpload({
     mimeType: resolvedMimeType,
     size: fileStat.size,
     ...metadata,
+    ...thumbnailMetadata,
     storedName,
     createdAt: now,
     updatedAt: now
@@ -368,7 +415,15 @@ export async function getVisibleGalleryMedia(user: AuthUser, mediaId: string) {
 
   return {
     media: publicMedia(media),
-    filePath: path.join(mediaDir, media.ownerUserId, media.storedName)
+    filePath: path.join(mediaDir, media.ownerUserId, media.storedName),
+    thumbnail: media.thumbnailName && media.thumbnailMimeType && media.thumbnailSize && media.thumbnailUpdatedAt
+      ? {
+        filePath: path.join(thumbnailDir, media.ownerUserId, media.thumbnailName),
+        mimeType: media.thumbnailMimeType,
+        size: media.thumbnailSize,
+        updatedAt: media.thumbnailUpdatedAt
+      }
+      : undefined
   };
 }
 
@@ -452,6 +507,9 @@ export async function deleteGalleryMedia(user: AuthUser, mediaId: string) {
 
     await writeGalleryIndex(records.filter((record) => record.id !== mediaId));
     await rm(path.join(mediaDir, media.ownerUserId, media.storedName), { force: true });
+    if (media.thumbnailName) {
+      await rm(path.join(thumbnailDir, media.ownerUserId, media.thumbnailName), { force: true });
+    }
     return "deleted" as const;
   });
 }
@@ -479,6 +537,9 @@ export async function deleteGalleryMediaBulk(user: AuthUser, mediaIds: string[])
 
       deletedIds.push(record.id);
       deletedFilePaths.push(path.join(mediaDir, record.ownerUserId, record.storedName));
+      if (record.thumbnailName) {
+        deletedFilePaths.push(path.join(thumbnailDir, record.ownerUserId, record.thumbnailName));
+      }
       return false;
     });
 

@@ -175,6 +175,23 @@ function headerFilename(filename: string) {
   return filename.replace(/["\\\r\n]/g, "_");
 }
 
+function headerValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function quotedEtag(value: string) {
+  return `"${value.replace(/["\\]/g, "_")}"`;
+}
+
+function sendCached(reply: { code: (statusCode: number) => { send: () => unknown } }, requestEtag: string | undefined, etag: string) {
+  if (requestEtag !== etag) {
+    return false;
+  }
+
+  reply.code(304).send();
+  return true;
+}
+
 function multipartFieldValue(field: unknown) {
   const candidate = Array.isArray(field) ? field[0] : field;
   const value = (candidate as { value?: unknown } | undefined)?.value;
@@ -516,16 +533,43 @@ server.get("/api/gallery/media/:id/content", async (request, reply) => {
   const user = await requireUser(request, reply);
   if (!user) return;
   const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const query = z.object({ variant: z.enum(["thumbnail"]).optional() }).parse(request.query);
   const storedMedia = await getVisibleGalleryMedia(user, params.id);
 
   if (!storedMedia) {
     return reply.code(404).send({ error: "Gallery media was not found" });
   }
 
-  reply.type(storedMedia.media.mimeType);
-  reply.header("Content-Length", storedMedia.media.size);
+  const isThumbnailRequest = query.variant === "thumbnail";
+  const streamTarget = isThumbnailRequest ? storedMedia.thumbnail : undefined;
+
+  if (isThumbnailRequest && !streamTarget) {
+    return reply.code(404).send({ error: "Gallery thumbnail was not found" });
+  }
+
+  const content = streamTarget ?? {
+    filePath: storedMedia.filePath,
+    mimeType: storedMedia.media.mimeType,
+    size: storedMedia.media.size,
+    updatedAt: storedMedia.media.updatedAt
+  };
+  const etag = quotedEtag(`gallery-${params.id}-${isThumbnailRequest ? "thumbnail" : "content"}-${content.size}-${content.updatedAt}`);
+
+  reply.header("ETag", etag);
+  reply.header("Vary", "Cookie");
+  reply.header("Cache-Control", isThumbnailRequest ? "private, max-age=31536000, immutable" : "private, max-age=0, must-revalidate");
+  if (!isThumbnailRequest) {
+    reply.header("Last-Modified", new Date(content.updatedAt).toUTCString());
+  }
+
+  if (sendCached(reply, headerValue(request.headers["if-none-match"]), etag)) {
+    return;
+  }
+
+  reply.type(content.mimeType);
+  reply.header("Content-Length", content.size);
   reply.header("Content-Disposition", `inline; filename="${headerFilename(storedMedia.media.filename)}"`);
-  return reply.send(createReadStream(storedMedia.filePath));
+  return reply.send(createReadStream(content.filePath));
 });
 
 server.post("/api/gallery/media/:id/share", async (request, reply) => {
