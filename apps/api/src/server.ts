@@ -58,6 +58,14 @@ import {
   saveGitHubConnection,
   setRuntimeGitHubToken
 } from "./github-auth.js";
+import {
+  deleteGalleryMedia,
+  getGalleryTimeline,
+  getVisibleGalleryMedia,
+  listGalleryMedia,
+  saveGalleryUpload,
+  setGalleryMediaVisibility
+} from "./gallery-store.js";
 import { listNotifications, markAllNotificationsRead, markNotificationRead } from "./notification-store.js";
 
 const server = Fastify({ logger: true });
@@ -418,6 +426,134 @@ server.patch("/api/notifications/:id", async (request, reply) => {
   }
 
   return { notification };
+});
+
+server.get("/api/gallery/media", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const query = z.object({
+    scope: z.enum(["private", "shared", "all"]).optional(),
+    year: z.coerce.number().int().min(1970).max(9999).optional(),
+    month: z.coerce.number().int().min(1).max(12).optional()
+  }).parse(request.query);
+
+  return { media: await listGalleryMedia(user, query) };
+});
+
+server.get("/api/gallery/timeline", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const query = z.object({
+    scope: z.enum(["private", "shared", "all"]).default("all")
+  }).parse(request.query);
+
+  return { timeline: await getGalleryTimeline(user, query.scope) };
+});
+
+server.post("/api/gallery/upload", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+
+  const upload = await request.file();
+  if (!upload) {
+    return reply.code(400).send({ error: "A multipart file field is required" });
+  }
+
+  const visibilityValue = multipartFieldValue(upload.fields.visibility);
+  const visibility = z.enum(["private", "shared"]).default("private").parse(visibilityValue || undefined);
+  const result = await saveGalleryUpload({
+    filename: upload.filename,
+    mimeType: upload.mimetype,
+    owner: user,
+    stream: upload.file,
+    visibility
+  });
+
+  if (result.status === "unsupported-type") {
+    return reply.code(415).send({ error: "Gallery supports JPG, PNG, WebP, GIF, MP4, WebM, and MOV files" });
+  }
+
+  return reply.code(201).send({ media: result.media });
+});
+
+server.get("/api/gallery/media/:id", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const storedMedia = await getVisibleGalleryMedia(user, params.id);
+
+  if (!storedMedia) {
+    return reply.code(404).send({ error: "Gallery media was not found" });
+  }
+
+  return { media: storedMedia.media };
+});
+
+server.get("/api/gallery/media/:id/content", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const storedMedia = await getVisibleGalleryMedia(user, params.id);
+
+  if (!storedMedia) {
+    return reply.code(404).send({ error: "Gallery media was not found" });
+  }
+
+  reply.type(storedMedia.media.mimeType);
+  reply.header("Content-Length", storedMedia.media.size);
+  reply.header("Content-Disposition", `inline; filename="${headerFilename(storedMedia.media.filename)}"`);
+  return reply.send(createReadStream(storedMedia.filePath));
+});
+
+server.post("/api/gallery/media/:id/share", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const result = await setGalleryMediaVisibility(user, params.id, "shared");
+
+  if (result.status === "ok") {
+    return { media: result.media };
+  }
+
+  if (result.status === "forbidden") {
+    return reply.code(403).send({ error: "You cannot manage that gallery item" });
+  }
+
+  return reply.code(404).send({ error: "Gallery media was not found" });
+});
+
+server.post("/api/gallery/media/:id/private", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const result = await setGalleryMediaVisibility(user, params.id, "private");
+
+  if (result.status === "ok") {
+    return { media: result.media };
+  }
+
+  if (result.status === "forbidden") {
+    return reply.code(403).send({ error: "You cannot manage that gallery item" });
+  }
+
+  return reply.code(404).send({ error: "Gallery media was not found" });
+});
+
+server.delete("/api/gallery/media/:id", async (request, reply) => {
+  const user = await requireUser(request, reply);
+  if (!user) return;
+  const params = z.object({ id: z.string().uuid() }).parse(request.params);
+  const result = await deleteGalleryMedia(user, params.id);
+
+  if (result === "deleted") {
+    return reply.code(204).send();
+  }
+
+  if (result === "forbidden") {
+    return reply.code(403).send({ error: "You cannot manage that gallery item" });
+  }
+
+  return reply.code(404).send({ error: "Gallery media was not found" });
 });
 
 server.get("/api/catalog", async (request, reply) => {

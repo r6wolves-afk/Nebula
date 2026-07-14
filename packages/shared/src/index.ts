@@ -108,6 +108,41 @@ export type AddonFileShare = {
   createdAt: string;
 };
 
+export type GalleryVisibility = "private" | "shared";
+
+export type GalleryMediaKind = "image" | "video";
+
+export type GalleryMedia = {
+  id: string;
+  ownerUserId: string;
+  ownerDisplayName: string;
+  kind: GalleryMediaKind;
+  visibility: GalleryVisibility;
+  filename: string;
+  mimeType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationSeconds?: number;
+  capturedAt: string;
+  year: number;
+  month: number;
+  contentUrl: string;
+  thumbnailUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GalleryTimelineMonth = {
+  month: number;
+  count: number;
+};
+
+export type GalleryTimelineYear = {
+  year: number;
+  months: GalleryTimelineMonth[];
+};
+
 export type NebulaChatScope = "general" | "direct";
 
 export type NebulaChatMessage = {
