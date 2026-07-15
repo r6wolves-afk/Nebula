@@ -19,6 +19,7 @@ services:
       NEBULA_NOVA_ENABLED: "true"
       NEBULA_NOVA_BASE_URL: http://ollama:11434
       NEBULA_NOVA_MODEL: qwen2.5:7b
+      NEBULA_NOVA_REQUEST_TIMEOUT_MS: 120000
     volumes:
       - nebula-data:/data
     depends_on:

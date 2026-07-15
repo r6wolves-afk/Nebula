@@ -23,12 +23,37 @@ type OllamaVersionResponse = {
   version?: unknown;
 };
 
+const defaultRequestTimeoutMs = 120_000;
+
 function cleanBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, "");
 }
 
 function novaEnabled() {
   return process.env.NEBULA_NOVA_ENABLED !== "false";
+}
+
+function novaRequestTimeoutMs() {
+  const configuredTimeout = Number(process.env.NEBULA_NOVA_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : defaultRequestTimeoutMs;
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), novaRequestTimeoutMs());
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`NOVA provider timed out after ${Math.round(novaRequestTimeoutMs() / 1000)} seconds`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function nebulaContext(user: AuthUser) {
@@ -71,7 +96,7 @@ export async function getNovaStatus(): Promise<NovaStatus> {
   }
 
   try {
-    const response = await fetch(`${cleanBaseUrl(provider.baseUrl)}/api/version`);
+    const response = await fetchWithTimeout(`${cleanBaseUrl(provider.baseUrl)}/api/version`);
     if (!response.ok) {
       return { enabled: true, provider, reachable: false, error: `Provider returned ${response.status}` };
     }
@@ -111,7 +136,7 @@ export async function sendNovaChat({
     ? `\n\nKnown private memory for ${user.displayName}:\n${memories.map((memory) => `- ${memory}`).join("\n")}`
     : "";
   const systemPrompt = `You are NOVA, the local personal assistant inside Nebula. You help ${user.displayName} with concise, useful answers while respecting their private Nebula data.\n\nBehavior:\n${novaBehavior()}\n\nNebula context:\n${nebulaContext(user)}${memoryBlock}`;
-  const response = await fetch(`${cleanBaseUrl(provider.baseUrl)}/api/chat`, {
+  const response = await fetchWithTimeout(`${cleanBaseUrl(provider.baseUrl)}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

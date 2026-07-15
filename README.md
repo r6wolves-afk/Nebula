@@ -343,4 +343,5 @@ NEBULA_COOKIE_SECURE        Set to true when Nebula is served over HTTPS and coo
 NEBULA_NOVA_ENABLED         Set to false to disable NOVA provider calls. Defaults to true.
 NEBULA_NOVA_BASE_URL        NOVA provider base URL. Defaults to http://127.0.0.1:11434.
 NEBULA_NOVA_MODEL           NOVA provider model name. Defaults to qwen2.5:7b.
+NEBULA_NOVA_REQUEST_TIMEOUT_MS  Maximum time to wait for a NOVA provider response. Defaults to 120000.
 ```
