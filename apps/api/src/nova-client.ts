@@ -5,7 +5,7 @@ const defaultProvider: NovaProvider = {
   name: "Local Ollama",
   kind: "ollama",
   baseUrl: process.env.NEBULA_NOVA_BASE_URL ?? "http://127.0.0.1:11434",
-  model: process.env.NEBULA_NOVA_MODEL ?? "qwen2.5:7b",
+  model: process.env.NEBULA_NOVA_MODEL ?? "qwen2.5:1.5b",
   enabled: process.env.NEBULA_NOVA_ENABLED !== "false",
   priority: 0,
   roles: ["chat", "reasoning", "summarization", "memory"],

@@ -116,7 +116,7 @@ http://ollama:11434
 Pull the default local model after the stack starts:
 
 ```bash
-docker compose -f docker-compose.nova.yml exec ollama ollama pull qwen2.5:7b
+docker compose -f docker-compose.nova.yml exec ollama ollama pull qwen2.5:1.5b
 ```
 
 The optional NOVA compose file stores Nebula data in `nebula-data` and Ollama models in `ollama-models`. It does not publish Ollama's port to the host by default, so it will not conflict with a host-installed Ollama. If you need host access to Ollama for debugging, add a local override that maps `11434:11434` on the `ollama` service.
@@ -301,8 +301,8 @@ For local development with Ollama:
 
 ```bash
 ollama serve
-ollama pull qwen2.5:7b
-NEBULA_NOVA_ENABLED=true NEBULA_NOVA_BASE_URL=http://127.0.0.1:11434 NEBULA_NOVA_MODEL=qwen2.5:7b npm run dev
+ollama pull qwen2.5:1.5b
+NEBULA_NOVA_ENABLED=true NEBULA_NOVA_BASE_URL=http://127.0.0.1:11434 NEBULA_NOVA_MODEL=qwen2.5:1.5b npm run dev
 ```
 
 NOVA stores private user state in the Nebula data directory:
@@ -342,6 +342,6 @@ NEBULA_MAX_UPLOAD_BYTES     Maximum upload size for add-on file storage. Default
 NEBULA_COOKIE_SECURE        Set to true when Nebula is served over HTTPS and cookies should be Secure.
 NEBULA_NOVA_ENABLED         Set to false to disable NOVA provider calls. Defaults to true.
 NEBULA_NOVA_BASE_URL        NOVA provider base URL. Defaults to http://127.0.0.1:11434.
-NEBULA_NOVA_MODEL           NOVA provider model name. Defaults to qwen2.5:7b.
+NEBULA_NOVA_MODEL           NOVA provider model name. Defaults to qwen2.5:1.5b.
 NEBULA_NOVA_REQUEST_TIMEOUT_MS  Maximum time to wait for a NOVA provider response. Defaults to 120000.
 ```

@@ -5,9 +5,8 @@
 services:
   # Main Nebula application container.
   nebula:
-    build:
-      # Portainer Web editor uses this Git branch as the Docker build context.
-      context: https://github.com/r6wolves-afk/Nebula.git#LLM-Compatibility
+    # Portainer Web editor uses this Git branch as the Docker build context.
+    build: https://github.com/r6wolves-afk/Nebula.git#LLM-Compatibility
     container_name: nebula
     restart: unless-stopped
     ports:
@@ -18,7 +17,7 @@ services:
       NEBULA_DATA_DIR: /data
       NEBULA_NOVA_ENABLED: "true"
       NEBULA_NOVA_BASE_URL: http://ollama:11434
-      NEBULA_NOVA_MODEL: qwen2.5:7b
+      NEBULA_NOVA_MODEL: qwen2.5:1.5b
       NEBULA_NOVA_REQUEST_TIMEOUT_MS: 120000
     volumes:
       - nebula-data:/data
