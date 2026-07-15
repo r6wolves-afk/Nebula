@@ -1,0 +1,17 @@
+{
+  "name": "Nebula",
+  "short_name": "Nebula",
+  "description": "A self-hosted portal for local tools, add-ons, chat, notifications, and NOVA.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0717",
+  "theme_color": "#0b0717",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

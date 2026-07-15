@@ -92,6 +92,35 @@ Nebula will be available at:
 http://localhost:8787
 ```
 
+### Optional Nebula + NOVA Local AI Stack
+
+The base compose file runs Nebula only. To run Nebula with a local Ollama model server for NOVA, use the standalone NOVA compose file:
+
+```bash
+docker compose -f docker-compose.nova.yml up --build
+```
+
+This starts two sibling services:
+
+```text
+nebula  Portal, API, users, chat, add-ons, and NOVA orchestration
+ollama  Local model runtime and downloaded model storage
+```
+
+Inside the compose network, Nebula reaches Ollama at:
+
+```text
+http://ollama:11434
+```
+
+Pull the default local model after the stack starts:
+
+```bash
+docker compose -f docker-compose.nova.yml exec ollama ollama pull qwen2.5:7b
+```
+
+The optional NOVA compose file stores Nebula data in `nebula-data` and Ollama models in `ollama-models`. It does not publish Ollama's port to the host by default, so it will not conflict with a host-installed Ollama. If you need host access to Ollama for debugging, add a local override that maps `11434:11434` on the `ollama` service.
+
 For server installs, mount persistent storage at `/data`. The Portainer template mounts `/opt/nebula/data` on the host to `/data` in the container so users, sessions, installed add-ons, GitHub settings, add-on storage, and uploaded files survive updates.
 
 ### Fresh Server Setup
@@ -264,6 +293,37 @@ POST /api/notifications/read-all
 
 General chat is visible to every authenticated user. Direct messages are visible only to the sender and target user. Chat messages create notifications for recipients, and users can mark one notification or all notifications as read.
 
+## NOVA Local Assistant
+
+NOVA is Nebula's local personal assistant surface. It runs through the Nebula API so user identity, per-user memory, and provider credentials stay on the server side. The first provider target is Ollama, but the API layer is shaped so other OpenAI-compatible local or remote providers can be added behind NOVA later.
+
+For local development with Ollama:
+
+```bash
+ollama serve
+ollama pull qwen2.5:7b
+NEBULA_NOVA_ENABLED=true NEBULA_NOVA_BASE_URL=http://127.0.0.1:11434 NEBULA_NOVA_MODEL=qwen2.5:7b npm run dev
+```
+
+NOVA stores private user state in the Nebula data directory:
+
+```text
+.nebula-data/nova/users/<user-id>/conversations.json
+.nebula-data/nova/users/<user-id>/memories.json
+```
+
+Authenticated NOVA routes:
+
+```text
+GET /api/nova/status
+GET /api/nova/conversations
+GET /api/nova/conversations/<conversation-id>
+POST /api/nova/chat { "body": "Hello", "conversationId": "optional-existing-id" }
+GET /api/nova/memory
+POST /api/nova/memory { "kind": "note", "text": "Remember this", "pinned": false }
+DELETE /api/nova/memory/<memory-id>
+```
+
 ## Useful Environment Variables
 
 ```text
@@ -280,4 +340,7 @@ NEBULA_CATALOG_URL          URL to a remote catalog JSON file.
 NEBULA_GITHUB_TOKEN         GitHub token for private catalogs or private add-on repositories.
 NEBULA_MAX_UPLOAD_BYTES     Maximum upload size for add-on file storage. Defaults to 1 GB.
 NEBULA_COOKIE_SECURE        Set to true when Nebula is served over HTTPS and cookies should be Secure.
+NEBULA_NOVA_ENABLED         Set to false to disable NOVA provider calls. Defaults to true.
+NEBULA_NOVA_BASE_URL        NOVA provider base URL. Defaults to http://127.0.0.1:11434.
+NEBULA_NOVA_MODEL           NOVA provider model name. Defaults to qwen2.5:7b.
 ```

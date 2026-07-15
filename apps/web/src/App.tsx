@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Cloud,
   MessageCircle,
+  Paperclip,
   Github,
   ExternalLink,
   FolderOpen,
@@ -21,13 +22,14 @@ import {
   Sparkles,
   Undo2,
   Trash2,
+  X,
   UserCheck,
   UserPlus
 } from "lucide-react";
-import { useEffect, useState } from "react";
-import type { AddonManifest, AuthStatus, AuthUser, CatalogSource, InstalledAddon, NebulaChatMessage, NebulaNotification, PendingUserRequest, PlatformSummary, UserRole } from "@nebula/shared";
+import { useEffect, useRef, useState } from "react";
+import type { AddonManifest, AuthStatus, AuthUser, CatalogSource, InstalledAddon, NebulaChatMessage, NebulaNotification, NovaConversation, NovaMemory, NovaMemoryKind, NovaMessage, NovaStatus, PendingUserRequest, PlatformSummary, UserRole } from "@nebula/shared";
 
-type Section = "dashboard" | "chat" | "notifications" | "store" | "installed" | "settings";
+type Section = "dashboard" | "nova" | "chat" | "notifications" | "store" | "installed" | "settings";
 type RouteState =
   | { section: Section; addonId?: undefined }
   | { section: "addon"; addonId: string };
@@ -40,6 +42,33 @@ type GitHubAuthStatus = {
 
 const chatPollIntervalMs = 5000;
 const notificationPollIntervalMs = 5000;
+const novaChatUserId = "nova-assistant";
+const novaMentionUser = { id: novaChatUserId, username: "nova", displayName: "NOVA" };
+const maxChatAttachments = 6;
+const localDateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  month: "short",
+  timeZoneName: "short",
+  year: "numeric"
+});
+
+function formatLocalDateTime(value: string) {
+  return localDateTimeFormatter.format(new Date(value));
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
 
 const iconMap = {
   "notebook-tabs": NotebookTabs,
@@ -49,6 +78,7 @@ const iconMap = {
 
 const navItems: Array<{ id: Section; label: string; icon: typeof Grid3X3 }> = [
   { id: "dashboard", label: "Dashboard", icon: Grid3X3 },
+  { id: "nova", label: "NOVA", icon: Sparkles },
   { id: "chat", label: "Nebula Chat", icon: MessageCircle },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "store", label: "App Store", icon: PackagePlus },
@@ -78,6 +108,10 @@ function routeFromPath(pathname: string): RouteState {
     return { section: "chat" };
   }
 
+  if (pathname === "/nova") {
+    return { section: "nova" };
+  }
+
   if (pathname === "/notifications") {
     return { section: "notifications" };
   }
@@ -92,6 +126,10 @@ function pathForRoute(route: RouteState): string {
 
   if (route.section === "chat") {
     return "/chat";
+  }
+
+  if (route.section === "nova") {
+    return "/nova";
   }
 
   if (route.section === "notifications") {
@@ -177,8 +215,26 @@ export default function App() {
   const [selectedDmUserId, setSelectedDmUserId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<NebulaChatMessage[]>([]);
   const [chatDraft, setChatDraft] = useState("");
+  const [chatAttachments, setChatAttachments] = useState<File[]>([]);
+  const [chatMention, setChatMention] = useState<{ start: number; query: string } | null>(null);
+  const chatInputRef = useRef<HTMLInputElement | null>(null);
+  const chatFileInputRef = useRef<HTMLInputElement | null>(null);
   const [chatMessage, setChatMessage] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<NebulaNotification[]>([]);
+  const [novaStatus, setNovaStatus] = useState<NovaStatus | null>(null);
+  const [novaConversations, setNovaConversations] = useState<NovaConversation[]>([]);
+  const [selectedNovaConversationId, setSelectedNovaConversationId] = useState<string | null>(null);
+  const [novaDraft, setNovaDraft] = useState("");
+  const [dashboardNovaDraft, setDashboardNovaDraft] = useState("");
+  const [dashboardNovaConversationId, setDashboardNovaConversationId] = useState<string | null>(null);
+  const [dashboardNovaReply, setDashboardNovaReply] = useState<{ prompt: string; reply: string } | null>(null);
+  const [pendingNovaPrompt, setPendingNovaPrompt] = useState<{ body: string; conversationId?: string } | null>(null);
+  const [typingNovaReply, setTypingNovaReply] = useState<{ conversationId: string; messageId?: string; body: string; visible: string; dashboardQuick: boolean; prompt: string } | null>(null);
+  const [novaBusy, setNovaBusy] = useState(false);
+  const [deletingNovaConversationId, setDeletingNovaConversationId] = useState<string | null>(null);
+  const [novaMessage, setNovaMessage] = useState<string | null>(null);
+  const [novaMemories, setNovaMemories] = useState<NovaMemory[]>([]);
+  const [newNovaMemory, setNewNovaMemory] = useState({ kind: "note" as NovaMemoryKind, text: "", pinned: false });
 
   async function loadAuthStatus() {
     setAuthStatus(await requestJson<AuthStatus>("/api/auth/status"));
@@ -229,6 +285,16 @@ export default function App() {
     setChatMessages([]);
     setNotifications([]);
     setPendingRequests([]);
+    setNovaStatus(null);
+    setNovaConversations([]);
+    setNovaMemories([]);
+    setSelectedNovaConversationId(null);
+    setDashboardNovaDraft("");
+    setDashboardNovaConversationId(null);
+    setDashboardNovaReply(null);
+    setPendingNovaPrompt(null);
+    setTypingNovaReply(null);
+    setDeletingNovaConversationId(null);
     navigate({ section: "dashboard" });
   }
 
@@ -402,10 +468,92 @@ export default function App() {
     setChatMessages(response.messages);
   }
 
+  function updateChatMention(value: string, cursorPosition: number | null) {
+    if (chatMode !== "general" || cursorPosition === null) {
+      setChatMention(null);
+      return;
+    }
+
+    const beforeCursor = value.slice(0, cursorPosition);
+    const mentionMatch = beforeCursor.match(/(^|\s)@([a-z0-9_.-]*)$/i);
+    if (!mentionMatch) {
+      setChatMention(null);
+      return;
+    }
+
+    setChatMention({
+      start: beforeCursor.length - (mentionMatch[2]?.length ?? 0) - 1,
+      query: mentionMatch[2] ?? ""
+    });
+  }
+
+  function changeChatDraft(event: React.ChangeEvent<HTMLInputElement>) {
+    setChatDraft(event.target.value);
+    updateChatMention(event.target.value, event.target.selectionStart);
+  }
+
+  function selectChatMention(user: Pick<AuthUser, "id" | "username" | "displayName">) {
+    if (!chatMention) {
+      return;
+    }
+
+    const mentionName = user.id === novaChatUserId ? user.username : user.displayName.replace(/\s+/g, "");
+    const mention = `@${mentionName} `;
+    const cursorPosition = chatInputRef.current?.selectionStart ?? chatDraft.length;
+    const nextDraft = `${chatDraft.slice(0, chatMention.start)}${mention}${chatDraft.slice(cursorPosition)}`;
+    const nextCursorPosition = chatMention.start + mention.length;
+    setChatDraft(nextDraft);
+    setChatMention(null);
+    window.setTimeout(() => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.setSelectionRange(nextCursorPosition, nextCursorPosition);
+    }, 0);
+  }
+
+  function handleChatComposerKeyDown(event: React.KeyboardEvent<HTMLInputElement>, suggestions: Array<Pick<AuthUser, "id" | "username" | "displayName">>) {
+    if (event.key === "Escape" && chatMention) {
+      event.preventDefault();
+      setChatMention(null);
+      return;
+    }
+
+    if ((event.key === "Tab" || event.key === "Enter") && chatMention && suggestions.length > 0) {
+      event.preventDefault();
+      selectChatMention(suggestions[0]);
+    }
+  }
+
+  function addChatAttachments(files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+
+    setChatAttachments((current) => [...current, ...files].slice(0, maxChatAttachments));
+  }
+
+  function removeChatAttachment(index: number) {
+    setChatAttachments((current) => current.filter((_, candidateIndex) => candidateIndex !== index));
+  }
+
+  function selectChatAttachments(event: React.ChangeEvent<HTMLInputElement>) {
+    addChatAttachments(Array.from(event.target.files ?? []));
+    event.target.value = "";
+  }
+
+  function pasteChatAttachments(event: React.ClipboardEvent<HTMLInputElement>) {
+    const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    addChatAttachments(files);
+  }
+
   async function sendChatMessage(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const body = chatDraft.trim();
-    if (!body) {
+    if (!body && chatAttachments.length === 0) {
       return;
     }
 
@@ -414,16 +562,185 @@ export default function App() {
       const url = chatMode === "direct" && selectedDmUserId
         ? `/api/chat/direct/${encodeURIComponent(selectedDmUserId)}`
         : "/api/chat/general";
-
-      await requestJson<{ message: NebulaChatMessage }>(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body })
-      });
+      if (chatAttachments.length > 0) {
+        const formData = new FormData();
+        formData.append("body", body);
+        chatAttachments.forEach((file) => formData.append("attachments", file, file.name));
+        await requestJson<{ message: NebulaChatMessage }>(url, { method: "POST", body: formData });
+      } else {
+        await requestJson<{ message: NebulaChatMessage }>(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body })
+        });
+      }
       setChatDraft("");
+      setChatAttachments([]);
+      setChatMention(null);
       await Promise.all([loadChatMessages(), loadNotifications()]);
     } catch {
       setChatMessage("Nebula could not send that message.");
+    }
+  }
+
+  async function loadNova() {
+    const [statusResponse, conversationsResponse, memoryResponse] = await Promise.all([
+      requestJson<{ status: NovaStatus }>("/api/nova/status"),
+      requestJson<{ conversations: NovaConversation[] }>("/api/nova/conversations"),
+      requestJson<{ memories: NovaMemory[] }>("/api/nova/memory")
+    ]);
+
+    setNovaStatus(statusResponse.status);
+    setNovaConversations(conversationsResponse.conversations);
+    setNovaMemories(memoryResponse.memories);
+    setSelectedNovaConversationId((current) => current ?? conversationsResponse.conversations[0]?.id ?? null);
+  }
+
+  async function sendNovaMessage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitNovaDraft();
+  }
+
+  async function submitNovaDraft() {
+    const body = novaDraft.trim();
+    if (!body || novaBusy) {
+      return;
+    }
+
+    setNovaDraft("");
+    await submitNovaPrompt(body, selectedNovaConversationId ?? undefined);
+  }
+
+  function handleNovaDraftKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitNovaDraft();
+    }
+  }
+
+  async function sendDashboardNovaMessage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const body = dashboardNovaDraft.trim();
+    if (!body || novaBusy) {
+      return;
+    }
+
+    setDashboardNovaDraft("");
+    await submitNovaPrompt(body, dashboardNovaConversationId ?? undefined, { dashboardQuick: true });
+  }
+
+  async function submitNovaPrompt(body: string, conversationId?: string, options: { dashboardQuick?: boolean } = {}) {
+    if (novaBusy) {
+      return;
+    }
+
+    setNovaBusy(true);
+    setNovaMessage(null);
+    setPendingNovaPrompt({ body, conversationId });
+    if (options.dashboardQuick) {
+      setDashboardNovaReply(null);
+    }
+    try {
+      const response = await requestJson<{ conversation: NovaConversation; message?: NovaMessage }>("/api/nova/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body, conversationId })
+      });
+      setNovaConversations((current) => [
+        response.conversation,
+        ...current.filter((conversation) => conversation.id !== response.conversation.id)
+      ]);
+      const assistantMessage = response.message
+        ?? [...response.conversation.messages].reverse().find((message) => message.role === "assistant");
+      if (assistantMessage) {
+        setTypingNovaReply({
+          body: assistantMessage.body,
+          conversationId: response.conversation.id,
+          dashboardQuick: Boolean(options.dashboardQuick),
+          messageId: assistantMessage.id,
+          prompt: body,
+          visible: ""
+        });
+      }
+      if (options.dashboardQuick) {
+        setDashboardNovaConversationId(response.conversation.id);
+        setDashboardNovaReply({ prompt: body, reply: assistantMessage?.body ?? "NOVA finished that request." });
+      } else {
+        setSelectedNovaConversationId(response.conversation.id);
+      }
+    } catch {
+      setNovaMessage("NOVA could not reach its model provider.");
+    } finally {
+      setPendingNovaPrompt(null);
+      setNovaBusy(false);
+    }
+  }
+
+  function novaMessageBody(message: { id: string; body: string }) {
+    return typingNovaReply?.messageId === message.id ? typingNovaReply.visible : message.body;
+  }
+
+  async function createNovaMemory(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = newNovaMemory.text.trim();
+    if (!text) {
+      return;
+    }
+
+    try {
+      const response = await requestJson<{ memory: NovaMemory }>("/api/nova/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...newNovaMemory, text })
+      });
+      setNewNovaMemory({ kind: "note", text: "", pinned: false });
+      setNovaMemories((current) => [response.memory, ...current]);
+    } catch {
+      setNovaMessage("NOVA could not save that memory.");
+    }
+  }
+
+  async function deleteNovaMemory(memoryId: string) {
+    try {
+      const response = await fetch(`/api/nova/memory/${memoryId}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      setNovaMemories((current) => current.filter((memory) => memory.id !== memoryId));
+    } catch {
+      setNovaMessage("NOVA could not delete that memory.");
+    }
+  }
+
+  async function deleteNovaConversation(conversationId: string) {
+    if (deletingNovaConversationId) {
+      return;
+    }
+
+    setNovaMessage(null);
+    setDeletingNovaConversationId(conversationId);
+
+    try {
+      const response = await fetch(`/api/nova/conversations/${conversationId}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+
+      setNovaConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+      if (selectedNovaConversationId === conversationId) {
+        setSelectedNovaConversationId(null);
+      }
+      if (dashboardNovaConversationId === conversationId) {
+        setDashboardNovaConversationId(null);
+        setDashboardNovaReply(null);
+      }
+      if (typingNovaReply?.conversationId === conversationId) {
+        setTypingNovaReply(null);
+      }
+    } catch {
+      setNovaMessage("NOVA could not delete that thread.");
+    } finally {
+      setDeletingNovaConversationId(null);
     }
   }
 
@@ -547,6 +864,12 @@ export default function App() {
   }, [route.section, chatMode, selectedDmUserId, authStatus?.user?.id]);
 
   useEffect(() => {
+    if ((route.section === "nova" || route.section === "dashboard") && authStatus?.user) {
+      void loadNova();
+    }
+  }, [route.section, authStatus?.user?.id]);
+
+  useEffect(() => {
     if (route.section !== "chat" || !authStatus?.user) {
       return;
     }
@@ -557,6 +880,46 @@ export default function App() {
 
     return () => window.clearInterval(intervalId);
   }, [route.section, chatMode, selectedDmUserId, authStatus?.user?.id]);
+
+  useEffect(() => {
+    if (!typingNovaReply || typingNovaReply.visible.length >= typingNovaReply.body.length) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setTypingNovaReply((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const remaining = current.body.length - current.visible.length;
+        const step = Math.min(Math.max(Math.ceil(remaining / 26), 2), 8);
+        return {
+          ...current,
+          visible: current.body.slice(0, current.visible.length + step)
+        };
+      });
+    }, 24);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [typingNovaReply]);
+
+  useEffect(() => {
+    const routeTitle = route.section === "addon"
+      ? installed.find((addon) => addon.id === route.addonId)?.name
+        ?? catalog.find((addon) => addon.id === route.addonId)?.name
+        ?? "Add-on"
+      : navItems.find((item) => item.id === route.section)?.label ?? "Dashboard";
+    const pageTitle = !authStatus
+      ? "Loading Nebula"
+      : authStatus.setupRequired
+        ? "Create Admin Account"
+        : !authStatus.user
+          ? authView === "register" ? "Request Account" : "Sign In"
+          : routeTitle;
+
+    document.title = `${pageTitle} | Nebula`;
+  }, [authStatus, authView, catalog, installed, route]);
 
   if (!authStatus) {
     return <AuthShell title="Loading Nebula" subtitle="Checking your session..." />;
@@ -596,11 +959,27 @@ export default function App() {
   const needsGitHubToken = Boolean(githubAuth.catalogLocked) || (catalogSource.type === "remote" && !githubAuth.configured);
   const activeAddon = route.section === "addon" ? installed.find((addon) => addon.id === route.addonId) : undefined;
   const activeManifest = route.section === "addon" ? catalog.find((addon) => addon.id === route.addonId) : undefined;
+  const activeNovaConversation = selectedNovaConversationId
+    ? novaConversations.find((conversation) => conversation.id === selectedNovaConversationId)
+    : undefined;
+  const showPendingNovaPrompt = Boolean(pendingNovaPrompt)
+    && (pendingNovaPrompt?.conversationId ? pendingNovaPrompt.conversationId === selectedNovaConversationId : !selectedNovaConversationId);
+  const dashboardTypingReply = typingNovaReply?.dashboardQuick ? typingNovaReply : null;
   const activeTitle = route.section === "addon"
     ? activeAddon?.name ?? activeManifest?.name ?? "Add-on"
     : navItems.find((item) => item.id === route.section)?.label ?? "Dashboard";
   const visibleNavItems = canManagePlatform ? navItems : navItems.filter((item) => item.id !== "store");
   const unreadNotifications = notifications.filter((notification) => !notification.readAt).length;
+  const chatMentionOptions: Array<Pick<AuthUser, "id" | "username" | "displayName">> = [novaMentionUser, ...directoryUsers];
+  const chatMentionSuggestions = chatMention
+    ? chatMentionOptions
+      .filter((user) => {
+        const query = chatMention.query.toLowerCase();
+        return user.username.toLowerCase().includes(query) || user.displayName.toLowerCase().includes(query);
+      })
+      .slice(0, 6)
+    : [];
+  const showChatMentionSuggestions = chatMode === "general" && chatMention !== null && chatMentionSuggestions.length > 0;
 
   return (
     <div className="app-shell">
@@ -693,6 +1072,54 @@ export default function App() {
               </>
             )}
 
+            <section className="panel dashboard-nova-card">
+              <div className="section-heading compact">
+                <div>
+                  <span className="eyebrow">NOVA</span>
+                  <h2>Assistant</h2>
+                </div>
+                <span className={novaStatus?.reachable ? "soft-pill nova-ready" : "soft-pill nova-offline"}>
+                  {novaStatus?.reachable ? "Online" : "Offline"}
+                </span>
+              </div>
+              <div className="dashboard-nova-stats">
+                <span>{novaConversations.length} thread{novaConversations.length === 1 ? "" : "s"}</span>
+                <span>{novaMemories.length} memor{novaMemories.length === 1 ? "y" : "ies"}</span>
+                <span>{novaStatus?.provider.model ?? "No model"}</span>
+              </div>
+              <form className="dashboard-nova-form" onSubmit={sendDashboardNovaMessage}>
+                <input
+                  disabled={novaBusy || novaStatus?.enabled === false}
+                  onChange={(event) => setDashboardNovaDraft(event.target.value)}
+                  placeholder="Ask NOVA from the dashboard"
+                  value={dashboardNovaDraft}
+                />
+                <button className="primary-action compact-action" disabled={novaBusy || novaStatus?.enabled === false} type="submit">
+                  <Sparkles size={16} />
+                  Ask
+                </button>
+              </form>
+              {novaBusy && route.section === "dashboard" && (
+                <div className="dashboard-nova-reply" aria-live="polite">
+                  <strong>NOVA</strong>
+                  <span className="typing-dots" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                  <span className="sr-only">NOVA is typing</span>
+                </div>
+              )}
+              {dashboardNovaReply && !novaBusy && (
+                <div className="dashboard-nova-reply">
+                  <strong>NOVA</strong>
+                  <p>{dashboardTypingReply?.visible || dashboardNovaReply.reply}</p>
+                </div>
+              )}
+              <button className="text-action" onClick={() => navigate({ section: "nova" })} type="button">Open full chat</button>
+              {novaMessage && route.section === "dashboard" && <p className="github-message">{novaMessage}</p>}
+            </section>
+
             <section className="panel wide-panel">
               <div className="section-heading">
                 <div>
@@ -710,6 +1137,166 @@ export default function App() {
                 <EmptyState action={() => navigate({ section: "store" })} />
               )}
             </section>
+          </section>
+        )}
+
+        {route.section === "nova" && (
+          <section className="panel page-panel chat-panel nova-panel">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Local Assistant</span>
+                <h2>NOVA</h2>
+              </div>
+              <span className={novaStatus?.reachable ? "soft-pill nova-ready" : "soft-pill nova-offline"}>
+                {novaStatus?.reachable ? `${novaStatus.provider.model} online` : "Provider offline"}
+              </span>
+            </div>
+
+            <div className="chat-layout nova-layout">
+              <aside className="chat-sidebar nova-sidebar">
+                <button className={!selectedNovaConversationId ? "chat-target active" : "chat-target"} onClick={() => setSelectedNovaConversationId(null)} type="button">
+                  <Sparkles size={18} />
+                  <span>New conversation</span>
+                </button>
+                {novaConversations.map((conversation) => (
+                  <div className={activeNovaConversation?.id === conversation.id ? "chat-target-row active" : "chat-target-row"} key={conversation.id}>
+                    <button
+                      className="chat-target thread-target"
+                      onClick={() => setSelectedNovaConversationId(conversation.id)}
+                      type="button"
+                    >
+                      <MessageCircle size={18} />
+                      <span>{conversation.title}</span>
+                    </button>
+                    <button
+                      className="icon-button thread-delete-button"
+                      disabled={Boolean(deletingNovaConversationId)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteNovaConversation(conversation.id);
+                      }}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      title={`Delete ${conversation.title}`}
+                      type="button"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ))}
+              </aside>
+
+              <section className="chat-thread" aria-live="polite">
+                <div className="message-list">
+                  {activeNovaConversation?.messages.map((message) => (
+                    <article className={message.role === "user" ? "chat-message own" : "chat-message nova-response"} key={message.id}>
+                      <div>
+                        <strong>{message.role === "user" ? currentUser.displayName : "NOVA"}</strong>
+                        <time>{formatLocalDateTime(message.createdAt)}</time>
+                      </div>
+                      <p>{novaMessageBody(message)}</p>
+                    </article>
+                  ))}
+                  {showPendingNovaPrompt && pendingNovaPrompt && (
+                    <>
+                      <article className="chat-message own pending-message">
+                        <div>
+                          <strong>{currentUser.displayName}</strong>
+                          <time>Sending</time>
+                        </div>
+                        <p>{pendingNovaPrompt.body}</p>
+                      </article>
+                      <article className="chat-message nova-response typing-message" aria-label="NOVA is typing">
+                        <div>
+                          <strong>NOVA</strong>
+                          <time>Typing</time>
+                        </div>
+                        <p>
+                          <span className="typing-dots" aria-hidden="true">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                          <span className="sr-only">NOVA is typing</span>
+                        </p>
+                      </article>
+                    </>
+                  )}
+                  {!activeNovaConversation?.messages.length && !showPendingNovaPrompt && (
+                    <div className="empty-state compact-empty">
+                      <Sparkles size={28} />
+                      <h3>NOVA is ready</h3>
+                    </div>
+                  )}
+                </div>
+                <form className="chat-composer" onSubmit={sendNovaMessage}>
+                  <textarea
+                    disabled={novaBusy || novaStatus?.enabled === false}
+                    onKeyDown={handleNovaDraftKeyDown}
+                    onChange={(event) => setNovaDraft(event.target.value)}
+                    placeholder="Ask NOVA"
+                    rows={1}
+                    value={novaDraft}
+                  />
+                  <button className="primary-action" disabled={novaBusy || novaStatus?.enabled === false} type="submit">
+                    <Sparkles size={18} />
+                    {novaBusy ? "Thinking" : "Send"}
+                  </button>
+                </form>
+                {novaMessage && <p className="github-message">{novaMessage}</p>}
+              </section>
+
+              <aside className="chat-sidebar nova-memory-panel">
+                <div className="nova-memory-heading">
+                  <strong>Memory</strong>
+                  <span>{novaMemories.length}</span>
+                </div>
+                <form className="nova-memory-form" onSubmit={createNovaMemory}>
+                  <select
+                    onChange={(event) => setNewNovaMemory((current) => ({ ...current, kind: event.target.value as NovaMemoryKind }))}
+                    value={newNovaMemory.kind}
+                  >
+                    <option value="note">Note</option>
+                    <option value="preference">Preference</option>
+                    <option value="fact">Fact</option>
+                    <option value="project">Project</option>
+                    <option value="instruction">Instruction</option>
+                  </select>
+                  <input
+                    onChange={(event) => setNewNovaMemory((current) => ({ ...current, text: event.target.value }))}
+                    placeholder="Remember this"
+                    value={newNovaMemory.text}
+                  />
+                  <label className="nova-memory-pin">
+                    <input
+                      checked={newNovaMemory.pinned}
+                      onChange={(event) => setNewNovaMemory((current) => ({ ...current, pinned: event.target.checked }))}
+                      type="checkbox"
+                    />
+                    Pinned
+                  </label>
+                  <button className="secondary-action compact-action" type="submit">Save</button>
+                </form>
+                <div className="nova-memory-list">
+                  {novaMemories.length > 0 ? novaMemories.map((memory) => (
+                    <article className="nova-memory-card" key={memory.id}>
+                      <div>
+                        <span className="soft-pill">{memory.kind}</span>
+                        {memory.pinned && <span className="soft-pill nova-ready">Pinned</span>}
+                      </div>
+                      <p>{memory.text}</p>
+                      <button className="icon-button" onClick={() => deleteNovaMemory(memory.id)} title="Delete memory" type="button">
+                        <Trash2 size={16} />
+                      </button>
+                    </article>
+                  )) : (
+                    <div className="empty-state compact-empty">
+                      <Sparkles size={28} />
+                      <h3>No memories yet</h3>
+                    </div>
+                  )}
+                </div>
+              </aside>
+            </div>
           </section>
         )}
 
@@ -751,12 +1338,29 @@ export default function App() {
               <section className="chat-thread" aria-live="polite">
                 <div className="message-list">
                   {chatMessages.length > 0 ? chatMessages.map((message) => (
-                    <article className={message.senderUserId === currentUser.id ? "chat-message own" : "chat-message"} key={message.id}>
+                    <article className={message.senderUserId === currentUser.id ? "chat-message own" : message.senderUserId === novaChatUserId ? "chat-message nova-response" : "chat-message"} key={message.id}>
                       <div>
                         <strong>{message.senderDisplayName}</strong>
-                        <time>{new Date(message.createdAt).toLocaleString()}</time>
+                        <time>{formatLocalDateTime(message.createdAt)}</time>
                       </div>
-                      <p>{message.body}</p>
+                      {message.body && <p>{message.body}</p>}
+                      {message.attachments && message.attachments.length > 0 && (
+                        <div className="chat-attachments">
+                          {message.attachments.map((attachment) => attachment.kind === "image" ? (
+                            <a className="chat-image-attachment" href={attachment.contentUrl} key={attachment.id} target="_blank" rel="noreferrer">
+                              <img alt={attachment.filename} src={attachment.contentUrl} />
+                            </a>
+                          ) : (
+                            <a className="chat-file-attachment" href={attachment.contentUrl} key={attachment.id} target="_blank" rel="noreferrer">
+                              <Paperclip size={16} />
+                              <span>
+                                <strong>{attachment.filename}</strong>
+                                <small>{formatFileSize(attachment.size)}</small>
+                              </span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </article>
                   )) : (
                     <div className="empty-state compact-empty">
@@ -766,12 +1370,72 @@ export default function App() {
                   )}
                 </div>
                 <form className="chat-composer" onSubmit={sendChatMessage}>
+                  <div className="mention-composer-field">
+                    {chatAttachments.length > 0 && (
+                      <div className="pending-attachments">
+                        {chatAttachments.map((file, index) => (
+                          <div className="pending-attachment" key={`${file.name}-${file.size}-${index}`}>
+                            <Paperclip size={15} />
+                            <span>
+                              <strong>{file.name || "Pasted image"}</strong>
+                              <small>{formatFileSize(file.size)}</small>
+                            </span>
+                            <button onClick={() => removeChatAttachment(index)} title={`Remove ${file.name || "attachment"}`} type="button">
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {showChatMentionSuggestions && (
+                      <div className="mention-suggestions" role="listbox">
+                        {chatMentionSuggestions.map((user) => (
+                          <button
+                            key={user.id}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => selectChatMention(user)}
+                            role="option"
+                            type="button"
+                          >
+                            <span className={user.id === novaChatUserId ? "avatar-dot nova-dot" : "avatar-dot"}>{user.displayName.slice(0, 1).toUpperCase()}</span>
+                            <span>
+                              <strong>{user.displayName}</strong>
+                              <small>@{user.username}</small>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <input
+                      disabled={chatMode === "direct" && !selectedDmUserId}
+                      onBlur={() => window.setTimeout(() => setChatMention(null), 120)}
+                      onChange={changeChatDraft}
+                      onClick={(event) => updateChatMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+                      onFocus={(event) => updateChatMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+                      onKeyDown={(event) => handleChatComposerKeyDown(event, chatMentionSuggestions)}
+                      onPaste={pasteChatAttachments}
+                      placeholder={chatMode === "direct" ? "Message this user" : "Message everyone"}
+                      ref={chatInputRef}
+                      value={chatDraft}
+                    />
+                  </div>
                   <input
-                    disabled={chatMode === "direct" && !selectedDmUserId}
-                    onChange={(event) => setChatDraft(event.target.value)}
-                    placeholder={chatMode === "direct" ? "Message this user" : "Message everyone"}
-                    value={chatDraft}
+                    accept="image/*,.pdf,.txt,.md,.json,.csv,.zip"
+                    hidden
+                    multiple
+                    onChange={selectChatAttachments}
+                    ref={chatFileInputRef}
+                    type="file"
                   />
+                  <button
+                    className="icon-button chat-attach-button"
+                    disabled={chatMode === "direct" && !selectedDmUserId}
+                    onClick={() => chatFileInputRef.current?.click()}
+                    title="Attach files"
+                    type="button"
+                  >
+                    <Paperclip size={18} />
+                  </button>
                   <button className="primary-action" disabled={chatMode === "direct" && !selectedDmUserId} type="submit">
                     <MessageCircle size={18} />
                     Send
@@ -802,7 +1466,7 @@ export default function App() {
                   <div>
                     <strong>{notification.title}</strong>
                     <p>{notification.body}</p>
-                    <time>{new Date(notification.createdAt).toLocaleString()}</time>
+                    <time>{formatLocalDateTime(notification.createdAt)}</time>
                   </div>
                   {!notification.readAt && (
                     <button className="secondary-action compact-action" onClick={() => markNotificationRead(notification.id)} type="button">
@@ -1373,7 +2037,7 @@ function AddonRouteScreen({
             </div>
             <div>
               <dt>Installed</dt>
-              <dd>{new Date(addon.installedAt).toLocaleString()}</dd>
+              <dd>{formatLocalDateTime(addon.installedAt)}</dd>
             </div>
           </dl>
         </section>

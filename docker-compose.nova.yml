@@ -1,0 +1,39 @@
+# Nebula + NOVA local AI stack.
+# This compose file starts two containers:
+# - nebula: the Nebula portal/API/UI
+# - ollama: the local AI model server used by NOVA
+services:
+  # Main Nebula application container.
+  nebula:
+    build: .
+    container_name: nebula
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      NEBULA_HOST: 0.0.0.0
+      NEBULA_PORT: 8787
+      NEBULA_DATA_DIR: /data
+      NEBULA_NOVA_ENABLED: "true"
+      NEBULA_NOVA_BASE_URL: http://ollama:11434
+      NEBULA_NOVA_MODEL: qwen2.5:7b
+    volumes:
+      - nebula-data:/data
+    depends_on:
+      - ollama
+
+  # Local Ollama model server container for NOVA.
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0
+      OLLAMA_KEEP_ALIVE: 24h
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  # Nebula accounts, sessions, add-ons, chat data, uploads, and NOVA memory.
+  nebula-data:
+  # Ollama model downloads and runtime cache.
+  ollama-models:
