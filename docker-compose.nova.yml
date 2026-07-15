@@ -5,7 +5,9 @@
 services:
   # Main Nebula application container.
   nebula:
-    build: .
+    build:
+      # Portainer Web editor uses this Git branch as the Docker build context.
+      context: https://github.com/r6wolves-afk/Nebula.git#LLM-Compatibility
     container_name: nebula
     restart: unless-stopped
     ports:
